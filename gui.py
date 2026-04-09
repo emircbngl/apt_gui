@@ -1,0 +1,477 @@
+"""
+PyQt5 GUI for controlling 3x TDC001 + MTS50/M stages simultaneously.
+Each motor has its own panel. Global controls at the top.
+"""
+
+import sys
+import json
+import os
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QGroupBox, QLabel, QPushButton, QDoubleSpinBox, QComboBox,
+    QFrame, QGridLayout, QMessageBox, QSizePolicy, QLineEdit,
+)
+from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtGui import QFont, QColor
+
+from devices import (
+    MotorStage, find_devices,
+    TRAVEL_MIN, TRAVEL_MAX, VEL_MAX, ACC_MAX, MIN_STEP,
+)
+
+
+COLORS = ["#2196F3", "#4CAF50", "#FF9800"]  # Blue, Green, Orange
+NAMES = ["Motor 1", "Motor 2", "Motor 3"]
+
+
+class StatusIndicator(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(12, 12)
+        self.set_inactive()
+
+    def set_active(self):
+        self.setStyleSheet("background-color:#4CAF50;border-radius:6px;border:1px solid #388E3C;")
+
+    def set_inactive(self):
+        self.setStyleSheet("background-color:#9E9E9E;border-radius:6px;border:1px solid #757575;")
+
+    def set_warning(self):
+        self.setStyleSheet("background-color:#FF9800;border-radius:6px;border:1px solid #F57C00;")
+
+    def set_error(self):
+        self.setStyleSheet("background-color:#F44336;border-radius:6px;border:1px solid #D32F2F;")
+
+
+class MotorPanel(QGroupBox):
+    """Self-contained panel for one motor stage."""
+
+    def __init__(self, index, color, name, parent=None):
+        super().__init__(parent)
+        self.index = index
+        self.color = color
+        self.name = name
+        self.stage = None
+
+        self.setTitle(f"  {name}  ")
+        self.setStyleSheet(f"""
+            MotorPanel {{
+                border: 2px solid {color};
+                border-radius: 6px;
+                margin-top: 8px;
+                font-weight: bold;
+            }}
+            MotorPanel::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 6px;
+                color: {color};
+            }}
+        """)
+        self._build_ui()
+        self._set_controls_enabled(False)
+
+    def set_nickname(self, nickname):
+        self.name = nickname or f"Motor {self.index + 1}"
+        self.setTitle(f"  {self.name}  ")
+        self.nick_edit.setText(self.name)
+
+    def _on_nick_changed(self):
+        text = self.nick_edit.text().strip()
+        if text:
+            self.name = text
+            self.setTitle(f"  {self.name}  ")
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.setContentsMargins(6, 14, 6, 6)
+
+        # ── Nickname row
+        nick_lay = QHBoxLayout()
+        nick_lay.addWidget(QLabel("İsim:"))
+        self.nick_edit = QLineEdit(self.name)
+        self.nick_edit.setPlaceholderText("Motor adı...")
+        self.nick_edit.editingFinished.connect(self._on_nick_changed)
+        nick_lay.addWidget(self.nick_edit)
+        layout.addLayout(nick_lay)
+
+        # ── Connection row
+        conn = QHBoxLayout()
+        self.port_combo = QComboBox()
+        self.port_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        conn.addWidget(self.port_combo)
+
+        self.btn_connect = QPushButton("Bağlan")
+        self.btn_connect.setFixedWidth(70)
+        self.btn_connect.clicked.connect(self._toggle_connection)
+        conn.addWidget(self.btn_connect)
+
+        self.conn_ind = StatusIndicator()
+        conn.addWidget(self.conn_ind)
+        layout.addLayout(conn)
+
+        # ── Status
+        status_grid = QGridLayout()
+        status_grid.setSpacing(4)
+
+        bold = QFont()
+        bold.setBold(True)
+
+        self.lbl_pos = QLabel("— mm")
+        self.lbl_pos.setFont(bold)
+        self.lbl_pos.setStyleSheet("font-size:15px;")
+        status_grid.addWidget(QLabel("Poz:"), 0, 0)
+        status_grid.addWidget(self.lbl_pos, 0, 1)
+
+        self.ind_homed = StatusIndicator()
+        status_grid.addWidget(QLabel("Home:"), 0, 2)
+        status_grid.addWidget(self.ind_homed, 0, 3)
+
+        self.ind_moving = StatusIndicator()
+        status_grid.addWidget(QLabel("Hrk:"), 0, 4)
+        status_grid.addWidget(self.ind_moving, 0, 5)
+
+        self.ind_enabled = StatusIndicator()
+        status_grid.addWidget(QLabel("Aktif:"), 0, 6)
+        status_grid.addWidget(self.ind_enabled, 0, 7)
+
+        layout.addLayout(status_grid)
+
+        # ── Move controls
+        move_lay = QHBoxLayout()
+        move_lay.addWidget(QLabel("Hedef:"))
+        self.spin_abs = QDoubleSpinBox()
+        self.spin_abs.setRange(TRAVEL_MIN, TRAVEL_MAX)
+        self.spin_abs.setDecimals(4)
+        self.spin_abs.setSingleStep(0.1)
+        move_lay.addWidget(self.spin_abs)
+
+        self.btn_go = QPushButton("Git")
+        self.btn_go.setFixedWidth(40)
+        self.btn_go.clicked.connect(self._move_absolute)
+        move_lay.addWidget(self.btn_go)
+
+        move_lay.addWidget(QLabel("Rel:"))
+        self.spin_rel = QDoubleSpinBox()
+        self.spin_rel.setRange(-TRAVEL_MAX, TRAVEL_MAX)
+        self.spin_rel.setDecimals(4)
+        self.spin_rel.setSingleStep(0.1)
+        move_lay.addWidget(self.spin_rel)
+
+        self.btn_rel = QPushButton("Git")
+        self.btn_rel.setFixedWidth(40)
+        self.btn_rel.clicked.connect(self._move_relative)
+        move_lay.addWidget(self.btn_rel)
+        layout.addLayout(move_lay)
+
+        # ── Jog
+        jog_lay = QHBoxLayout()
+        self.btn_jog_rev = QPushButton("◀")
+        self.btn_jog_rev.setFixedWidth(30)
+        self.btn_jog_rev.clicked.connect(lambda: self._jog("reverse"))
+        jog_lay.addWidget(self.btn_jog_rev)
+
+        self.spin_jog = QDoubleSpinBox()
+        self.spin_jog.setRange(MIN_STEP, TRAVEL_MAX)
+        self.spin_jog.setDecimals(4)
+        self.spin_jog.setValue(0.1)
+        self.spin_jog.setSingleStep(0.01)
+        self.spin_jog.setPrefix("Adım: ")
+        self.spin_jog.setSuffix(" mm")
+        jog_lay.addWidget(self.spin_jog)
+
+        self.btn_jog_fwd = QPushButton("▶")
+        self.btn_jog_fwd.setFixedWidth(30)
+        self.btn_jog_fwd.clicked.connect(lambda: self._jog("forward"))
+        jog_lay.addWidget(self.btn_jog_fwd)
+
+        self.btn_home = QPushButton("Home")
+        self.btn_home.setFixedWidth(50)
+        self.btn_home.clicked.connect(self._home)
+        jog_lay.addWidget(self.btn_home)
+
+        self.btn_stop = QPushButton("DUR")
+        self.btn_stop.setFixedWidth(40)
+        self.btn_stop.setStyleSheet("background-color:#F44336;color:white;font-weight:bold;")
+        self.btn_stop.clicked.connect(self._stop)
+        jog_lay.addWidget(self.btn_stop)
+        layout.addLayout(jog_lay)
+
+        # ── Velocity
+        vel_lay = QHBoxLayout()
+        vel_lay.addWidget(QLabel("Hız:"))
+        self.spin_vel = QDoubleSpinBox()
+        self.spin_vel.setRange(0.01, VEL_MAX)
+        self.spin_vel.setDecimals(3)
+        self.spin_vel.setValue(2.0)
+        self.spin_vel.setSuffix(" mm/s")
+        vel_lay.addWidget(self.spin_vel)
+
+        vel_lay.addWidget(QLabel("İvme:"))
+        self.spin_acc = QDoubleSpinBox()
+        self.spin_acc.setRange(0.01, ACC_MAX)
+        self.spin_acc.setDecimals(3)
+        self.spin_acc.setValue(1.5)
+        self.spin_acc.setSuffix(" mm/s²")
+        vel_lay.addWidget(self.spin_acc)
+
+        self.btn_apply = QPushButton("Uygula")
+        self.btn_apply.setFixedWidth(55)
+        self.btn_apply.clicked.connect(self._apply_velocity)
+        vel_lay.addWidget(self.btn_apply)
+        layout.addLayout(vel_lay)
+
+    # ── Connection ───────────────────────────────────────────────────
+
+    def populate_ports(self, devices):
+        current = self.port_combo.currentData()
+        self.port_combo.clear()
+        for dev in devices:
+            sn = dev.get("serial_number", "")
+            label = f"SN: {sn}" if sn else dev["port"]
+            self.port_combo.addItem(label, dev["port"])
+        # Restore previous selection if possible
+        if current:
+            idx = self.port_combo.findData(current)
+            if idx >= 0:
+                self.port_combo.setCurrentIndex(idx)
+
+    def _toggle_connection(self):
+        if self.stage:
+            self.disconnect()
+        else:
+            self.connect()
+
+    def connect(self):
+        port = self.port_combo.currentData()
+        if not port:
+            return
+        try:
+            self.stage = MotorStage(serial_port=port, home=False)
+            self.btn_connect.setText("Kes")
+            self.conn_ind.set_active()
+            self._set_controls_enabled(True)
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"{self.name}: {e}")
+
+    def disconnect(self):
+        if self.stage:
+            try:
+                self.stage.close()
+            except Exception:
+                pass
+            self.stage = None
+        self.btn_connect.setText("Bağlan")
+        self.conn_ind.set_inactive()
+        self._set_controls_enabled(False)
+        self.lbl_pos.setText("— mm")
+        self.ind_homed.set_inactive()
+        self.ind_moving.set_inactive()
+        self.ind_enabled.set_inactive()
+
+    @property
+    def is_connected(self):
+        return self.stage is not None
+
+    # ── Actions ──────────────────────────────────────────────────────
+
+    def _home(self):
+        if self.stage:
+            self.stage.home()
+
+    def _move_absolute(self):
+        if self.stage:
+            self.stage.move_absolute(self.spin_abs.value())
+
+    def _move_relative(self):
+        if self.stage:
+            self.stage.move_relative(self.spin_rel.value())
+
+    def _jog(self, direction):
+        if self.stage:
+            step = self.spin_jog.value()
+            vel = self.spin_vel.value()
+            acc = self.spin_acc.value()
+            self.stage.set_jog_params(step, vel, acc)
+            self.stage.jog(direction)
+
+    def _stop(self):
+        if self.stage:
+            self.stage.stop()
+
+    def _apply_velocity(self):
+        if self.stage:
+            self.stage.set_velocity(self.spin_vel.value(), self.spin_acc.value())
+
+    # ── Status Update ────────────────────────────────────────────────
+
+    def update_status(self):
+        if not self.stage:
+            return
+        try:
+            s = self.stage.status
+            self.lbl_pos.setText(f"{self.stage.position_mm:.4f} mm")
+            self.ind_homed.set_active() if s["homed"] else self.ind_homed.set_inactive()
+            self.ind_moving.set_warning() if self.stage.is_moving else self.ind_moving.set_inactive()
+            self.ind_enabled.set_active() if s["channel_enabled"] else self.ind_enabled.set_inactive()
+        except Exception:
+            pass
+
+    def _set_controls_enabled(self, enabled):
+        for w in (self.spin_abs, self.spin_rel, self.spin_jog, self.spin_vel, self.spin_acc,
+                  self.btn_go, self.btn_rel, self.btn_jog_rev, self.btn_jog_fwd,
+                  self.btn_home, self.btn_stop, self.btn_apply):
+            w.setEnabled(enabled)
+
+
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+
+def _load_config():
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_config(cfg):
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Thorlabs APT — 3x MTS50/M Stage Control")
+        self.setMinimumSize(900, 460)
+
+        self.panels = []
+        self._poll_timer = QTimer()
+        self._poll_timer.timeout.connect(self._poll_all)
+        self._build_ui()
+        self._load_nicknames()
+        self._poll_timer.start(200)
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setSpacing(6)
+
+        # ── Global toolbar
+        toolbar = QHBoxLayout()
+
+        self.btn_scan = QPushButton("Cihazları Tara")
+        self.btn_scan.clicked.connect(self._scan)
+        toolbar.addWidget(self.btn_scan)
+
+        self.btn_connect_all = QPushButton("Tümünü Bağla")
+        self.btn_connect_all.clicked.connect(self._connect_all)
+        toolbar.addWidget(self.btn_connect_all)
+
+        self.btn_disconnect_all = QPushButton("Tümünü Kes")
+        self.btn_disconnect_all.clicked.connect(self._disconnect_all)
+        toolbar.addWidget(self.btn_disconnect_all)
+
+        toolbar.addWidget(self._vsep())
+
+        self.btn_home_all = QPushButton("Tümünü Home")
+        self.btn_home_all.clicked.connect(self._home_all)
+        toolbar.addWidget(self.btn_home_all)
+
+        self.btn_stop_all = QPushButton("TÜMÜNÜ DURDUR")
+        self.btn_stop_all.setStyleSheet(
+            "background-color:#F44336;color:white;font-weight:bold;padding:4px 12px;"
+        )
+        self.btn_stop_all.clicked.connect(self._stop_all)
+        toolbar.addWidget(self.btn_stop_all)
+
+        toolbar.addStretch()
+
+        self.lbl_status = QLabel("Hazır")
+        toolbar.addWidget(self.lbl_status)
+        root.addLayout(toolbar)
+
+        # ── 3 Motor panels side by side
+        panels_lay = QHBoxLayout()
+        panels_lay.setSpacing(6)
+        for i in range(3):
+            panel = MotorPanel(i, COLORS[i], NAMES[i])
+            panel.nick_edit.editingFinished.connect(self._save_nicknames)
+            self.panels.append(panel)
+            panels_lay.addWidget(panel)
+        root.addLayout(panels_lay)
+
+    def _vsep(self):
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        return sep
+
+    # ── Global Actions ───────────────────────────────────────────────
+
+    def _scan(self):
+        devices = find_devices()
+        self.lbl_status.setText(f"{len(devices)} cihaz bulundu")
+        for panel in self.panels:
+            panel.populate_ports(devices)
+        # Auto-assign different devices to each panel
+        for i, panel in enumerate(self.panels):
+            if i < len(devices) and i < panel.port_combo.count():
+                panel.port_combo.setCurrentIndex(i)
+
+    def _connect_all(self):
+        for panel in self.panels:
+            if not panel.is_connected and panel.port_combo.currentData():
+                panel.connect()
+        n = sum(1 for p in self.panels if p.is_connected)
+        self.lbl_status.setText(f"{n} motor bağlandı")
+
+    def _disconnect_all(self):
+        for panel in self.panels:
+            panel.disconnect()
+        self.lbl_status.setText("Tüm bağlantılar kesildi")
+
+    def _home_all(self):
+        for panel in self.panels:
+            if panel.is_connected:
+                panel.stage.home()
+        self.lbl_status.setText("Tümü home yapılıyor...")
+
+    def _stop_all(self):
+        for panel in self.panels:
+            if panel.is_connected:
+                panel.stage.stop()
+        self.lbl_status.setText("Tümü durduruldu")
+
+    # ── Polling ──────────────────────────────────────────────────────
+
+    def _poll_all(self):
+        for panel in self.panels:
+            panel.update_status()
+
+    # ── Nickname persistence ────────────────────────────────────────
+
+    def _load_nicknames(self):
+        cfg = _load_config()
+        names = cfg.get("nicknames", {})
+        for i, panel in enumerate(self.panels):
+            nick = names.get(str(i), "")
+            if nick:
+                panel.set_nickname(nick)
+
+    def _save_nicknames(self):
+        cfg = _load_config()
+        cfg["nicknames"] = {str(i): p.name for i, p in enumerate(self.panels)}
+        _save_config(cfg)
+
+    def closeEvent(self, event):
+        self._save_nicknames()
+        self._poll_timer.stop()
+        for panel in self.panels:
+            panel.disconnect()
+        event.accept()
