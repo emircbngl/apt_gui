@@ -4,8 +4,8 @@ Thorlabs APT Stage Controller
 Replaces legacy Thorlabs APT software for TDC001/KDC101 + MTS50/M.
 
 Usage:
-    python main.py            GUI'yi başlatır
-    python main.py --diag     Cihaz algılama teşhisi yazar (özellikle Windows)
+    python main.py            starts the GUI
+    python main.py --diag     prints device-detection diagnostics (esp. Windows)
 """
 
 import sys
@@ -16,7 +16,7 @@ def _print_diagnostics():
     isn't being found so the cause is unambiguous."""
     import platform
     print("=" * 60)
-    print("Thorlabs APT — Cihaz Algılama Teşhisi")
+    print("Thorlabs APT — Device Detection Diagnostics")
     print("=" * 60)
     print("Platform :", platform.platform())
     print("Python   :", sys.version.split()[0], platform.machine())
@@ -25,41 +25,41 @@ def _print_diagnostics():
 
     print("\n--- find_devices() ---")
     devs = find_devices()
-    print(f"Bulunan: {len(devs)}")
+    print(f"Found: {len(devs)}")
     for d in devs:
         print(f"  {d['port']}  SN={d['serial_number']}  "
               f"pid={d['pid']}  kind={d['kind']}  ({d['description']})")
 
-    print("\n--- Tüm seri portlar (pyserial) ---")
+    print("\n--- All serial ports (pyserial) ---")
     try:
         from serial.tools.list_ports import comports
         ports = list(comports())
         if not ports:
-            print("  (hiç COM/tty portu yok)")
+            print("  (no COM/tty ports at all)")
         for p in ports:
             print(f"  {p.device}  VID={p.vid} PID={p.pid}  "
                   f"SN={p.serial_number}  desc={p.description}")
     except Exception as e:
-        print("  pyserial hatası:", repr(e))
+        print("  pyserial error:", repr(e))
 
     print("\n--- FTDI D2XX (Windows) ---")
     try:
         import ftd2xx
         n = ftd2xx.createDeviceInfoList()
-        print(f"  ftd2xx kurulu. D2XX {n} cihaz görüyor:")
+        print(f"  ftd2xx installed. D2XX sees {n} device(s):")
         for i in range(n):
             try:
                 info = ftd2xx.getDeviceInfoDetail(i)
                 print(f"   [{i}] id=0x{info.get('id',0):08x} "
                       f"serial={info.get('serial')} desc={info.get('description')}")
             except Exception as e:
-                print(f"   [{i}] okunamadı: {e!r}")
+                print(f"   [{i}] unreadable: {e!r}")
     except ImportError:
-        print("  ftd2xx paketi KURULU DEĞİL  ->  pip install ftd2xx")
+        print("  ftd2xx package NOT INSTALLED  ->  pip install ftd2xx")
     except Exception as e:
-        print("  ftd2xx hatası:", repr(e))
+        print("  ftd2xx error:", repr(e))
 
-    print("\n--- diagnose() mesajı ---")
+    print("\n--- diagnose() message ---")
     print(diagnose()["message"])
     print("=" * 60)
 

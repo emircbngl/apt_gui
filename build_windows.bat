@@ -1,25 +1,25 @@
 @echo off
 REM ============================================================
 REM  Thorlabs APT Stage Controller - Windows Build Script
-REM  Python 3.10+ kurulu bir Windows makinede calistirin.
-REM  dist\ThorlabsAPT.exe adinda tek dosyalik bir .exe uretir.
+REM  Run on a Windows machine with Python 3.10+ installed.
+REM  Produces a single-file .exe at dist\ThorlabsAPT.exe.
 REM ============================================================
 
-echo [1/3] Bagimliliklar kuruluyor...
+echo [1/3] Installing dependencies...
 pip install pyserial PyQt5 pyinstaller ftd2xx || pip3 install pyserial PyQt5 pyinstaller ftd2xx
 
-echo [2/3] EXE olusturuluyor...
+echo [2/3] Building the EXE...
 pyinstaller --onefile --windowed --name "ThorlabsAPT" ^
     --hidden-import serial.tools.list_ports ^
     --hidden-import ftd2xx ^
     main.py
 
-echo [3/3] Bitti!
+echo [3/3] Done!
 echo.
 if exist "dist\ThorlabsAPT.exe" (
-    echo [OK] Calistirma dosyasi: dist\ThorlabsAPT.exe
-    echo Bu dosyayi Python kurulu olmayan herhangi bir Windows PC'ye kopyalayabilirsiniz.
+    echo [OK] Executable: dist\ThorlabsAPT.exe
+    echo Copy it to any Windows PC - no Python needed.
 ) else (
-    echo [!] EXE olusturulamadi. "python main.py" ile calistirabilirsiniz.
+    echo [!] EXE build failed. You can still run the app with "python main.py".
 )
 pause

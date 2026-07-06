@@ -397,7 +397,7 @@ def find_devices():
 
 def diagnose():
     """Explain *why* discovery found what it found. Returns a dict with a
-    human-readable Turkish `message` plus structured counts for the GUI."""
+    human-readable `message` plus structured counts for the GUI."""
     info = {
         "platform": sys.platform,
         "usb_total": None,
@@ -441,64 +441,64 @@ def diagnose():
             info["d2xx_available"] = False
 
     if matched:
-        info["message"] = f"{len(matched)} Thorlabs cihazı bulundu."
+        info["message"] = f"Found {len(matched)} Thorlabs device(s)."
         return info
 
     # Nothing matched — build actionable guidance.
-    lines = ["Hiç Thorlabs cihazı bulunamadı.", ""]
+    lines = ["No Thorlabs devices found.", ""]
 
     if _is_windows():
         if info["d2xx_available"] is False:
             lines += [
-                "Windows'ta Thorlabs cihazları D2XX sürücüsüyle konuşur ama",
-                "'ftd2xx' paketi kurulu değil. Komut isteminde çalıştırın:",
+                "On Windows, Thorlabs devices talk through the D2XX driver, but",
+                "the 'ftd2xx' package is not installed. Run in a command prompt:",
                 "    pip install ftd2xx",
-                "(veya INSTALL.bat'i yeniden çalıştırın).",
+                "(or re-run INSTALL.bat).",
             ]
         elif info["d2xx_count"] == 0:
             lines += [
-                "D2XX sürücüsü HİÇ FTDI cihazı görmüyor. Kontrol edin:",
-                "  • TDC001/KDC101 kutusu harici güce bağlı ve AÇIK mı?",
-                "  • USB kablosu VERİ kablosu mu? (sadece-şarj kablosu görünmez)",
-                "  • Thorlabs Kinesis/APT yazılımı açıksa cihazı kilitler — KAPATIN.",
-                "  • Aygıt Yöneticisi'nde cihaz FTDI/USB Serial olarak görünüyor mu?",
+                "The D2XX driver sees NO FTDI devices at all. Check:",
+                "  • Is the TDC001/KDC101 cube connected to external power and ON?",
+                "  • Is the USB cable a DATA cable? (charge-only cables are invisible)",
+                "  • Thorlabs Kinesis/APT software locks the device if open — CLOSE it.",
+                "  • Does the device show up as FTDI/USB Serial in Device Manager?",
             ]
         else:
             lines += [
-                f"D2XX {info['d2xx_count']} cihaz görüyor ama açılamadı. Büyük",
-                "olasılıkla Thorlabs Kinesis/APT yazılımı açık ve cihazı meşgul",
-                "ediyor — o yazılımı kapatıp yeniden tarayın.",
+                f"D2XX sees {info['d2xx_count']} device(s) but none could be opened.",
+                "Most likely the Thorlabs Kinesis/APT software is running and holding",
+                "the device — close it and scan again.",
             ]
             if info["serial_ports"]:
-                lines.append("Seri portlar: " + ", ".join(info["serial_ports"]))
+                lines.append("Serial ports: " + ", ".join(info["serial_ports"]))
         info["message"] = "\n".join(lines)
         return info
 
     if info["usb_total"] == 0:
         lines += [
-            "İşletim sistemi HİÇBİR USB cihazı görmüyor. Yani sorun uygulamada",
-            "değil, cihaz USB üzerinden hiç görünmüyor. Kontrol edin:",
-            "  • TDC001/KDC101 kutusu HARİCİ GÜÇE bağlı mı? (T-Cube sadece USB",
-            "    ile çalışmaz; güç kaynağı ya da hub gerekir — güç yoksa USB'de",
-            "    hiç görünmez.)",
-            "  • USB kablosu VERİ taşıyan bir kablo mu? (Sadece şarj kablosu",
-            "    cihaza güç verir ama veri hattı yoktur → görünmez.)",
-            "  • Kablo/port sağlam mı? Farklı bir USB portu/kablosu deneyin.",
+            "The operating system sees NO USB devices at all, so the problem is",
+            "not in this app — the device is simply not visible over USB. Check:",
+            "  • Is the TDC001/KDC101 cube connected to EXTERNAL POWER? (A T-Cube",
+            "    does not run on USB alone; it needs a power supply or hub — with",
+            "    no power it does not appear on USB at all.)",
+            "  • Is the USB cable a DATA cable? (A charge-only cable powers the",
+            "    device but has no data lines → invisible.)",
+            "  • Cable/port OK? Try a different USB port/cable.",
         ]
     elif info["ftdi_count"] and not matched:
         lines += [
-            f"{info['ftdi_count']} FTDI cihazı görülüyor ama APT olarak açılamadı.",
-            "Cihaz başka bir sürücü/uygulama tarafından meşgul ediliyor olabilir",
-            "(ör. eski Thorlabs APT/Kinesis yazılımı açık). O yazılımı kapatın.",
+            f"{info['ftdi_count']} FTDI device(s) visible but none opened as APT.",
+            "The device may be held by another driver/application",
+            "(e.g. legacy Thorlabs APT/Kinesis software running). Close it.",
         ]
     else:
         lines += [
-            "USB cihazlar görülüyor ama hiçbiri Thorlabs FTDI (VID 0x0403) değil.",
-            "Cihazın gerçekten takılı ve güçlü olduğundan emin olun; başka bir",
-            "USB port/kablo deneyin.",
+            "USB devices are visible but none is a Thorlabs FTDI (VID 0x0403).",
+            "Make sure the device is actually plugged in and powered; try a",
+            "different USB port/cable.",
         ]
         if info["serial_ports"]:
-            lines.append("Görülen seri portlar: " + ", ".join(info["serial_ports"]))
+            lines.append("Serial ports seen: " + ", ".join(info["serial_ports"]))
     info["message"] = "\n".join(lines)
     return info
 
