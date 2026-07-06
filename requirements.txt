@@ -1,8 +1,11 @@
 PyQt5>=5.15
 pyserial>=3.5
-# macOS libusb yolu için (Windows'ta gerekmez):
+# macOS libusb path (not needed on Windows):
 pyftdi>=0.54; sys_platform == "darwin"
 pyusb>=1.2; sys_platform == "darwin"
-# Windows D2XX yolu için — Thorlabs Kinesis sürücüsü cihazı COM portu olarak
-# GÖSTERMEZ; D2XX ile doğrudan erişilir:
+# Windows D2XX path — the Thorlabs Kinesis driver does NOT expose the device
+# as a COM port; it is accessed directly through D2XX:
 ftd2xx>=1.3; sys_platform == "win32"
+# HTTPS certificate bundle for the updater (python.org's macOS Python has no
+# system CA store wired in by default):
+certifi>=2024.0.0

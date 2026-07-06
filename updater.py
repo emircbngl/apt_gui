@@ -19,10 +19,12 @@ Three install paths, picked automatically:
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -66,12 +68,26 @@ def is_newer(remote, local):
     return _ver_tuple(remote) > _ver_tuple(local)
 
 
+def _urlopen(url, timeout):
+    """urlopen with a certifi fallback: python.org's macOS Python does not use
+    the system certificate store, so the default SSL context fails with
+    CERTIFICATE_VERIFY_FAILED until certifi is wired in. Verification is NEVER
+    disabled — the fallback just supplies a proper CA bundle."""
+    req = urllib.request.Request(url, headers={"User-Agent": "apt-gui-updater"})
+    try:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.URLError as e:
+        if not isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+            raise
+        import certifi  # raises ImportError -> caller treats as failure
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+
+
 def fetch_latest(timeout=10):
     """Version string published on GitHub main, or None on ANY failure."""
     try:
-        req = urllib.request.Request(RAW_VERSION_URL,
-                                     headers={"User-Agent": "apt-gui-updater"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _urlopen(RAW_VERSION_URL, timeout) as resp:
             text = resp.read().decode("utf-8", errors="replace")
         m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', text)
         return m.group(1) if m else None
@@ -112,8 +128,7 @@ def download_zip(dest_dir=None, timeout=120):
     cleanup_download() when the zip is no longer needed."""
     dest_dir = dest_dir or tempfile.mkdtemp(prefix="apt_gui_update_")
     path = os.path.join(dest_dir, f"apt_gui-{BRANCH}.zip")
-    req = urllib.request.Request(ZIP_URL, headers={"User-Agent": "apt-gui-updater"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp, open(path, "wb") as f:
+    with _urlopen(ZIP_URL, timeout) as resp, open(path, "wb") as f:
         shutil.copyfileobj(resp, f)
     return path
 
