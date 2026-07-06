@@ -1,0 +1,5 @@
+PyQt5>=5.15
+pyserial>=3.5
+# macOS libusb yolu için (Windows'ta gerekmez):
+pyftdi>=0.54; sys_platform == "darwin"
+pyusb>=1.2; sys_platform == "darwin"

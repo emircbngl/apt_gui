@@ -1,16 +1,22 @@
 """
-Direct APT protocol driver for Thorlabs TDC001 + MTS50/M.
-Windows version — uses pyserial (FTDI VCP driver creates COM ports).
+Direct APT protocol driver for Thorlabs TDC001 / KDC101 + MTS50/M stages.
+
+Cross-platform device discovery:
+  * macOS  -> libusb via pyftdi (Thorlabs custom PID 0xFAF0 is NOT claimed by
+              Apple's FTDI VCP driver, so it is reachable through libusb),
+              with a /dev/cu.usbserial-* fallback via pyserial.
+  * Windows/Linux -> pyserial COM/tty ports (FTDI VCP driver creates them).
+
+No dependency on thorlabs-apt-device.
 """
 
+import re
+import sys
 import struct
 import time
 import threading
 
-import serial
-from serial.tools.list_ports import comports
-
-# MTS50/M-Z8 constants (from Thorlabs datasheet HA0210T Rev K)
+# ── MTS50/M-Z8 constants (Thorlabs datasheet HA0210T Rev K) ──────────────
 COUNTS_PER_MM = 34304
 TIME_UNIT = 2048 / 6e6
 
@@ -18,18 +24,28 @@ TIME_UNIT = 2048 / 6e6
 TRAVEL_MIN = 0.0       # mm
 TRAVEL_MAX = 50.0      # mm
 VEL_MAX = 2.4          # mm/s
-ACC_MAX = 4.5           # mm/s^2
+ACC_MAX = 4.5          # mm/s^2
 MIN_STEP = 0.0008      # mm (0.8 um min repeatable incremental movement)
 BACKLASH = 0.006       # mm (< 6 um)
 HOME_ACCURACY = 0.004  # mm (+/- 4.0 um)
 
-# Thorlabs FTDI
+# ── USB identifiers ──────────────────────────────────────────────────────
+# FTDI vendor id used by every APT motion controller (TDC001, KDC101, BSC, ...).
+# APT controllers are ALWAYS FTDI-based; Thorlabs' own VID 0x1313 is for cameras
+# and power meters, not motion stages, so we deliberately do not scan it.
 VID = 0x0403
+# Product id the TDC001/KDC101 ship with out of the box.
 PID = 0xFAF0
+# Known APT product ids. We still accept *any* FTDI pid (see _is_apt_pid) so a
+# differently-configured cube is discovered instead of silently ignored.
+APT_PIDS = {0xFAF0, 0xFAF1, 0xFAF2, 0xFAF3, 0xFAF4, 0xFAF5, 0xFAF6}
 
-# APT message IDs
+# ── APT message ids ──────────────────────────────────────────────────────
 HW_REQ_INFO = 0x0005
+HW_GET_INFO = 0x0006
+HW_START_UPDATEMSGS = 0x0011
 HW_STOP_UPDATEMSGS = 0x0012
+HW_DISCONNECT = 0x0002
 MOT_MOVE_HOME = 0x0443
 MOT_MOVE_ABSOLUTE = 0x0453
 MOT_MOVE_RELATIVE = 0x0448
@@ -40,9 +56,13 @@ MOT_SET_VELPARAMS = 0x0413
 MOT_REQ_VELPARAMS = 0x0414
 MOT_GET_VELPARAMS = 0x0415
 MOT_SET_JOGPARAMS = 0x0416
+MOT_REQ_JOGPARAMS = 0x0417
+MOT_GET_JOGPARAMS = 0x0418
 MOT_REQ_DCSTATUSUPDATE = 0x0490
 MOT_GET_DCSTATUSUPDATE = 0x0491
+MOT_ACK_DCSTATUSUPDATE = 0x0492
 MOT_SET_ENASTATE = 0x0210
+MOT_REQ_ENASTATE = 0x0211
 MOT_MOVE_HOMED = 0x0444
 MOD_IDENTIFY = 0x0223
 
@@ -51,6 +71,30 @@ HOST = 0x01
 RACK = 0x50
 BAY0 = 0x21
 
+
+def _is_macos():
+    return sys.platform == "darwin"
+
+
+def _is_apt_pid(pid):
+    return pid in APT_PIDS
+
+
+def _register_ftdi(vid, pid):
+    """Register a custom FTDI product with pyftdi so its ftdi:// URL can be
+    parsed/opened. pyftdi keys its registry by the *name*, so each (vid, pid)
+    must get a UNIQUE name — otherwise registering a second PID under a shared
+    name silently overwrites the first, making that device un-openable."""
+    try:
+        from pyftdi.ftdi import Ftdi
+        Ftdi.add_custom_product(vid, pid, f"Thorlabs APT {vid:04x}:{pid:04x}")
+    except ValueError:
+        pass  # this exact PID value is already registered — fine
+    except Exception:
+        pass
+
+
+# ── Unit conversions ─────────────────────────────────────────────────────
 
 def mm_to_counts(mm):
     return int(mm * COUNTS_PER_MM)
@@ -76,43 +120,206 @@ def _counts_to_acc(counts):
     return counts / (COUNTS_PER_MM * TIME_UNIT * TIME_UNIT * 65536)
 
 
-def find_devices():
-    """List connected Thorlabs APT devices on Windows COM ports."""
-    devices = []
+# ── Port open ────────────────────────────────────────────────────────────
+
+def _open_port(serial_port):
+    """Open a port. ftdi:// URL -> pyftdi (libusb); anything else -> pyserial."""
+    if serial_port.startswith("ftdi://"):
+        # Register the exact vid:pid this URL points at (pyftdi refuses to parse
+        # a URL whose product id it doesn't know), plus the default 0xFAF0.
+        m = re.match(r"ftdi://0x([0-9a-fA-F]+):0x([0-9a-fA-F]+):", serial_port)
+        if m:
+            _register_ftdi(int(m.group(1), 16), int(m.group(2), 16))
+        _register_ftdi(VID, PID)
+        from pyftdi.serialext import serial_for_url
+        port = serial_for_url(serial_port, baudrate=115200, timeout=0.1)
+    else:
+        import serial
+        port = serial.Serial(serial_port, baudrate=115200, bytesize=8,
+                             parity="N", stopbits=1, timeout=0.1)
+    port.reset_input_buffer()
+    port.reset_output_buffer()
+    return port
+
+
+# ── Discovery ────────────────────────────────────────────────────────────
+
+def _find_serial_ports():
+    """FTDI/APT devices exposed as OS serial ports (pyserial). Cross-platform."""
+    found = []
+    try:
+        from serial.tools.list_ports import comports
+    except Exception:
+        return found
     for p in comports():
-        if p.vid == VID and p.pid == PID:
-            devices.append({
+        if getattr(p, "vid", None) == VID:
+            found.append({
                 "port": p.device,
-                "serial_number": p.serial_number or "",
-                "description": p.description or "APT Device",
+                "serial_number": getattr(p, "serial_number", "") or "",
+                "description": (getattr(p, "product", None)
+                                or getattr(p, "description", None) or "APT Device"),
+                "pid": getattr(p, "pid", None),
+                "kind": "serial",
             })
+    return found
+
+
+def _find_ftdi_devices():
+    """FTDI devices reachable through libusb (macOS path). Returns list of dicts."""
+    found = []
+    try:
+        import usb.core
+        import usb.util
+    except Exception:
+        return found
+
+    try:
+        devs = usb.core.find(find_all=True, idVendor=VID)
+    except Exception:
+        return found
+    for d in devs or []:
+        pid = d.idProduct
+        _register_ftdi(VID, pid)  # unique-name registration so the URL opens
+        # Best-effort string reads; a claimed device may refuse them.
+        sn = ""
+        desc = "Thorlabs APT" if _is_apt_pid(pid) else "FTDI device"
+        try:
+            if d.iSerialNumber:
+                sn = usb.util.get_string(d, d.iSerialNumber) or ""
+        except Exception:
+            pass
+        try:
+            if d.iProduct:
+                desc = usb.util.get_string(d, d.iProduct) or desc
+        except Exception:
+            pass
+        # Prefer a serial-number URL; fall back to bus:address if unreadable.
+        if sn:
+            url = f"ftdi://0x{VID:04x}:0x{pid:04x}:{sn}/1"
+        else:
+            url = f"ftdi://0x{VID:04x}:0x{pid:04x}:{d.bus:x}:{d.address:x}/1"
+        found.append({
+            "port": url,
+            "serial_number": sn,
+            "description": desc,
+            "pid": pid,
+            "kind": "ftdi",
+        })
+    return found
+
+
+def find_devices():
+    """List connected Thorlabs APT devices. Returns a list of dicts:
+    {port, serial_number, description, pid, kind}. Never raises."""
+    devices = []
+    seen = set()
+
+    def _add(dev):
+        key = dev.get("serial_number") or dev.get("port")
+        if key in seen:
+            return
+        seen.add(key)
+        devices.append(dev)
+
+    if _is_macos():
+        # Primary path on macOS: libusb (custom PID isn't grabbed by the VCP driver).
+        for dev in _find_ftdi_devices():
+            _add(dev)
+        # Fallback: if a VCP driver *did* claim it, it shows up as /dev/cu.usbserial-*.
+        for dev in _find_serial_ports():
+            _add(dev)
+    else:
+        for dev in _find_serial_ports():
+            _add(dev)
+
     return devices
+
+
+def diagnose():
+    """Explain *why* discovery found what it found. Returns a dict with a
+    human-readable Turkish `message` plus structured counts for the GUI."""
+    info = {
+        "platform": sys.platform,
+        "usb_total": None,
+        "ftdi_count": 0,
+        "serial_ports": [],
+        "matched": 0,
+        "message": "",
+    }
+
+    matched = find_devices()
+    info["matched"] = len(matched)
+
+    # Count everything libusb can see (macOS) — helps distinguish "wrong PID"
+    # from "no USB device at all".
+    try:
+        import usb.core
+        all_usb = list(usb.core.find(find_all=True))
+        info["usb_total"] = len(all_usb)
+        info["ftdi_count"] = sum(1 for d in all_usb if d.idVendor == VID)
+    except Exception:
+        info["usb_total"] = None
+
+    try:
+        from serial.tools.list_ports import comports
+        info["serial_ports"] = [p.device for p in comports()]
+    except Exception:
+        pass
+
+    if matched:
+        info["message"] = f"{len(matched)} Thorlabs cihazı bulundu."
+        return info
+
+    # Nothing matched — build actionable guidance.
+    lines = ["Hiç Thorlabs cihazı bulunamadı.", ""]
+    if info["usb_total"] == 0:
+        lines += [
+            "İşletim sistemi HİÇBİR USB cihazı görmüyor. Yani sorun uygulamada",
+            "değil, cihaz USB üzerinden hiç görünmüyor. Kontrol edin:",
+            "  • TDC001/KDC101 kutusu HARİCİ GÜÇE bağlı mı? (T-Cube sadece USB",
+            "    ile çalışmaz; güç kaynağı ya da hub gerekir — güç yoksa USB'de",
+            "    hiç görünmez.)",
+            "  • USB kablosu VERİ taşıyan bir kablo mu? (Sadece şarj kablosu",
+            "    cihaza güç verir ama veri hattı yoktur → görünmez.)",
+            "  • Kablo/port sağlam mı? Farklı bir USB portu/kablosu deneyin.",
+        ]
+    elif info["ftdi_count"] and not matched:
+        lines += [
+            f"{info['ftdi_count']} FTDI cihazı görülüyor ama APT olarak açılamadı.",
+            "Cihaz başka bir sürücü/uygulama tarafından meşgul ediliyor olabilir",
+            "(ör. eski Thorlabs APT/Kinesis yazılımı açık). O yazılımı kapatın.",
+        ]
+    else:
+        lines += [
+            "USB cihazlar görülüyor ama hiçbiri Thorlabs FTDI (VID 0x0403) değil.",
+            "Cihazın gerçekten takılı ve güçlü olduğundan emin olun; başka bir",
+            "USB port/kablo deneyin.",
+        ]
+        if info["serial_ports"]:
+            lines.append("Görülen seri portlar: " + ", ".join(info["serial_ports"]))
+    info["message"] = "\n".join(lines)
+    return info
 
 
 class MotorStage:
     """
-    Direct APT protocol driver for TDC001 + MTS50/M stage.
+    Direct APT protocol driver for TDC001/KDC101 + MTS50/M stage.
     All positions in mm, velocity in mm/s, acceleration in mm/s^2.
     """
 
-    def __init__(self, serial_port, home=False):
+    def __init__(self, serial_port, home=False, auto_enable=True):
         self.serial_port = serial_port
-        self._port = serial.Serial(
-            serial_port, baudrate=115200, bytesize=8,
-            parity="N", stopbits=1, timeout=0.1
-        )
-        self._port.reset_input_buffer()
-        self._port.reset_output_buffer()
+        self._port = _open_port(serial_port)
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
 
         self._status = {
-            "position": 0, "velocity": 0,
+            "position": 0, "velocity": 0, "enc_count": 0,
             "forward_limit_switch": False, "reverse_limit_switch": False,
             "moving_forward": False, "moving_reverse": False,
             "homing": False, "homed": False, "settled": False,
             "motor_connected": False, "channel_enabled": False,
-            "motion_error": False,
+            "motion_error": False, "motor_current_limit_reached": False,
         }
         self._vel_max = 0
         self._vel_acc = 0
@@ -120,6 +327,12 @@ class MotorStage:
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._poll_thread.start()
         time.sleep(0.5)
+
+        # A freshly connected channel may be disabled -> moves are silently
+        # ignored. Enable it so the user's first command actually runs.
+        if auto_enable:
+            self.set_enabled(True)
+
         self._request_vel_params()
 
         if home:
@@ -153,6 +366,7 @@ class MotorStage:
         return buf
 
     def _parse_status(self, data):
+        """Parse MOT_GET_DCSTATUSUPDATE response (20 bytes)."""
         if len(data) < 20:
             return
         msg_id = struct.unpack("<H", data[0:2])[0]
@@ -161,6 +375,7 @@ class MotorStage:
         pos = struct.unpack("<i", data[8:12])[0]
         vel = struct.unpack("<H", data[12:14])[0]
         flags = struct.unpack("<I", data[16:20])[0]
+
         self._status["position"] = pos
         self._status["velocity"] = vel
         self._status["forward_limit_switch"] = bool(flags & 0x01)
@@ -287,7 +502,7 @@ class MotorStage:
         step = mm_to_counts(step_mm)
         vel = _vel_to_counts(max_velocity_mmps)
         acc = _acc_to_counts(acceleration_mmpsps)
-        stop_mode = 0x02
+        stop_mode = 0x02  # profiled stop
         payload = struct.pack("<hHIIII", 0x0001, mode, step, vel, acc, stop_mode)
         self._send_long(MOT_SET_JOGPARAMS, payload)
 

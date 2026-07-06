@@ -1,5 +1,5 @@
 """
-PyQt5 GUI for controlling 3x TDC001 + MTS50/M stages simultaneously.
+PyQt5 GUI for controlling 3x TDC001/KDC101 + MTS50/M stages simultaneously.
 Each motor has its own panel. Global controls at the top.
 """
 
@@ -12,10 +12,10 @@ from PyQt5.QtWidgets import (
     QFrame, QGridLayout, QMessageBox, QSizePolicy, QLineEdit,
 )
 from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtGui import QFont
 
 from devices import (
-    MotorStage, find_devices,
+    MotorStage, find_devices, diagnose,
     TRAVEL_MIN, TRAVEL_MAX, VEL_MAX, ACC_MAX, MIN_STEP,
 )
 
@@ -84,8 +84,8 @@ class MotorPanel(QGroupBox):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
-        layout.setContentsMargins(6, 14, 6, 6)
+        layout.setSpacing(8)
+        layout.setContentsMargins(10, 18, 10, 10)
 
         # ── Nickname row
         nick_lay = QHBoxLayout()
@@ -113,14 +113,14 @@ class MotorPanel(QGroupBox):
 
         # ── Status
         status_grid = QGridLayout()
-        status_grid.setSpacing(4)
+        status_grid.setSpacing(6)
 
         bold = QFont()
         bold.setBold(True)
 
         self.lbl_pos = QLabel("— mm")
         self.lbl_pos.setFont(bold)
-        self.lbl_pos.setStyleSheet("font-size:15px;")
+        self.lbl_pos.setStyleSheet("font-size:16px;")
         status_grid.addWidget(QLabel("Poz:"), 0, 0)
         status_grid.addWidget(self.lbl_pos, 0, 1)
 
@@ -145,10 +145,13 @@ class MotorPanel(QGroupBox):
         self.spin_abs.setRange(TRAVEL_MIN, TRAVEL_MAX)
         self.spin_abs.setDecimals(4)
         self.spin_abs.setSingleStep(0.1)
-        move_lay.addWidget(self.spin_abs)
+        self.spin_abs.setSuffix(" mm")
+        self.spin_abs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.spin_abs.setMinimumWidth(95)
+        move_lay.addWidget(self.spin_abs, 1)
 
         self.btn_go = QPushButton("Git")
-        self.btn_go.setFixedWidth(40)
+        self.btn_go.setFixedWidth(44)
         self.btn_go.clicked.connect(self._move_absolute)
         move_lay.addWidget(self.btn_go)
 
@@ -157,10 +160,13 @@ class MotorPanel(QGroupBox):
         self.spin_rel.setRange(-TRAVEL_MAX, TRAVEL_MAX)
         self.spin_rel.setDecimals(4)
         self.spin_rel.setSingleStep(0.1)
-        move_lay.addWidget(self.spin_rel)
+        self.spin_rel.setSuffix(" mm")
+        self.spin_rel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.spin_rel.setMinimumWidth(95)
+        move_lay.addWidget(self.spin_rel, 1)
 
         self.btn_rel = QPushButton("Git")
-        self.btn_rel.setFixedWidth(40)
+        self.btn_rel.setFixedWidth(44)
         self.btn_rel.clicked.connect(self._move_relative)
         move_lay.addWidget(self.btn_rel)
         layout.addLayout(move_lay)
@@ -168,7 +174,7 @@ class MotorPanel(QGroupBox):
         # ── Jog
         jog_lay = QHBoxLayout()
         self.btn_jog_rev = QPushButton("◀")
-        self.btn_jog_rev.setFixedWidth(30)
+        self.btn_jog_rev.setFixedWidth(32)
         self.btn_jog_rev.clicked.connect(lambda: self._jog("reverse"))
         jog_lay.addWidget(self.btn_jog_rev)
 
@@ -179,20 +185,29 @@ class MotorPanel(QGroupBox):
         self.spin_jog.setSingleStep(0.01)
         self.spin_jog.setPrefix("Adım: ")
         self.spin_jog.setSuffix(" mm")
-        jog_lay.addWidget(self.spin_jog)
+        self.spin_jog.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.spin_jog.setMinimumWidth(140)
+        jog_lay.addWidget(self.spin_jog, 1)
 
         self.btn_jog_fwd = QPushButton("▶")
-        self.btn_jog_fwd.setFixedWidth(30)
+        self.btn_jog_fwd.setFixedWidth(32)
         self.btn_jog_fwd.clicked.connect(lambda: self._jog("forward"))
         jog_lay.addWidget(self.btn_jog_fwd)
 
         self.btn_home = QPushButton("Home")
-        self.btn_home.setFixedWidth(50)
+        self.btn_home.setFixedWidth(54)
         self.btn_home.clicked.connect(self._home)
         jog_lay.addWidget(self.btn_home)
 
+        self.btn_enable = QPushButton("Etkin")
+        self.btn_enable.setCheckable(True)
+        self.btn_enable.setFixedWidth(56)
+        self.btn_enable.setToolTip("Motor kanalını etkinleştir/devre dışı bırak")
+        self.btn_enable.clicked.connect(self._toggle_enable)
+        jog_lay.addWidget(self.btn_enable)
+
         self.btn_stop = QPushButton("DUR")
-        self.btn_stop.setFixedWidth(40)
+        self.btn_stop.setFixedWidth(44)
         self.btn_stop.setStyleSheet("background-color:#F44336;color:white;font-weight:bold;")
         self.btn_stop.clicked.connect(self._stop)
         jog_lay.addWidget(self.btn_stop)
@@ -206,7 +221,9 @@ class MotorPanel(QGroupBox):
         self.spin_vel.setDecimals(3)
         self.spin_vel.setValue(2.0)
         self.spin_vel.setSuffix(" mm/s")
-        vel_lay.addWidget(self.spin_vel)
+        self.spin_vel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.spin_vel.setMinimumWidth(108)
+        vel_lay.addWidget(self.spin_vel, 1)
 
         vel_lay.addWidget(QLabel("İvme:"))
         self.spin_acc = QDoubleSpinBox()
@@ -214,13 +231,16 @@ class MotorPanel(QGroupBox):
         self.spin_acc.setDecimals(3)
         self.spin_acc.setValue(1.5)
         self.spin_acc.setSuffix(" mm/s²")
-        vel_lay.addWidget(self.spin_acc)
+        self.spin_acc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.spin_acc.setMinimumWidth(120)
+        vel_lay.addWidget(self.spin_acc, 1)
 
         self.btn_apply = QPushButton("Uygula")
-        self.btn_apply.setFixedWidth(55)
+        self.btn_apply.setFixedWidth(62)
         self.btn_apply.clicked.connect(self._apply_velocity)
         vel_lay.addWidget(self.btn_apply)
         layout.addLayout(vel_lay)
+        layout.addStretch(1)
 
     # ── Connection ───────────────────────────────────────────────────
 
@@ -231,7 +251,6 @@ class MotorPanel(QGroupBox):
             sn = dev.get("serial_number", "")
             label = f"SN: {sn}" if sn else dev["port"]
             self.port_combo.addItem(label, dev["port"])
-        # Restore previous selection if possible
         if current:
             idx = self.port_combo.findData(current)
             if idx >= 0:
@@ -253,7 +272,10 @@ class MotorPanel(QGroupBox):
             self.conn_ind.set_active()
             self._set_controls_enabled(True)
         except Exception as e:
-            QMessageBox.critical(self, "Hata", f"{self.name}: {e}")
+            QMessageBox.critical(self, "Bağlantı Hatası",
+                                 f"{self.name} bağlanamadı:\n\n{e}\n\n"
+                                 "Cihaz başka bir programca kullanılıyor olabilir "
+                                 "(eski Thorlabs APT/Kinesis yazılımını kapatın).")
 
     def disconnect(self):
         if self.stage:
@@ -300,6 +322,10 @@ class MotorPanel(QGroupBox):
         if self.stage:
             self.stage.stop()
 
+    def _toggle_enable(self):
+        if self.stage:
+            self.stage.set_enabled(self.btn_enable.isChecked())
+
     def _apply_velocity(self):
         if self.stage:
             self.stage.set_velocity(self.spin_vel.value(), self.spin_acc.value())
@@ -314,14 +340,19 @@ class MotorPanel(QGroupBox):
             self.lbl_pos.setText(f"{self.stage.position_mm:.4f} mm")
             self.ind_homed.set_active() if s["homed"] else self.ind_homed.set_inactive()
             self.ind_moving.set_warning() if self.stage.is_moving else self.ind_moving.set_inactive()
-            self.ind_enabled.set_active() if s["channel_enabled"] else self.ind_enabled.set_inactive()
+            enabled = s["channel_enabled"]
+            self.ind_enabled.set_active() if enabled else self.ind_enabled.set_inactive()
+            # Keep the toggle in sync with the device without re-triggering it.
+            self.btn_enable.blockSignals(True)
+            self.btn_enable.setChecked(enabled)
+            self.btn_enable.blockSignals(False)
         except Exception:
             pass
 
     def _set_controls_enabled(self, enabled):
         for w in (self.spin_abs, self.spin_rel, self.spin_jog, self.spin_vel, self.spin_acc,
                   self.btn_go, self.btn_rel, self.btn_jog_rev, self.btn_jog_fwd,
-                  self.btn_home, self.btn_stop, self.btn_apply):
+                  self.btn_home, self.btn_enable, self.btn_stop, self.btn_apply):
             w.setEnabled(enabled)
 
 
@@ -348,7 +379,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Thorlabs APT — 3x MTS50/M Stage Control")
-        self.setMinimumSize(900, 460)
+        self.setMinimumSize(1180, 380)
+        self.resize(1300, 430)
 
         self.panels = []
         self._poll_timer = QTimer()
@@ -361,7 +393,8 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setSpacing(6)
+        root.setSpacing(8)
+        root.setContentsMargins(8, 8, 8, 8)
 
         # ── Global toolbar
         toolbar = QHBoxLayout()
@@ -395,34 +428,43 @@ class MainWindow(QMainWindow):
 
         self.lbl_status = QLabel("Hazır")
         toolbar.addWidget(self.lbl_status)
-        root.addLayout(toolbar)
+        root.addLayout(toolbar, 0)
 
         # ── 3 Motor panels side by side
         panels_lay = QHBoxLayout()
-        panels_lay.setSpacing(6)
+        panels_lay.setSpacing(8)
         for i in range(3):
             panel = MotorPanel(i, COLORS[i], NAMES[i])
             panel.nick_edit.editingFinished.connect(self._save_nicknames)
             self.panels.append(panel)
-            panels_lay.addWidget(panel)
-        root.addLayout(panels_lay)
+            panels_lay.addWidget(panel, 1)
+        root.addLayout(panels_lay, 1)
 
     def _vsep(self):
         sep = QFrame()
         sep.setFrameShape(QFrame.VLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        sep.setFixedHeight(26)
         return sep
 
     # ── Global Actions ───────────────────────────────────────────────
 
     def _scan(self):
         devices = find_devices()
-        self.lbl_status.setText(f"{len(devices)} cihaz bulundu")
         for panel in self.panels:
             panel.populate_ports(devices)
-        # Auto-assign different devices to each panel
+        # Auto-assign a different device to each panel.
         for i, panel in enumerate(self.panels):
             if i < len(devices) and i < panel.port_combo.count():
                 panel.port_combo.setCurrentIndex(i)
+
+        if devices:
+            self.lbl_status.setText(f"{len(devices)} cihaz bulundu")
+        else:
+            # No device: explain *why* instead of a silent empty list.
+            self.lbl_status.setText("0 cihaz bulundu")
+            info = diagnose()
+            QMessageBox.warning(self, "Cihaz bulunamadı", info["message"])
 
     def _connect_all(self):
         for panel in self.panels:
