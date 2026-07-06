@@ -16,8 +16,14 @@ import struct
 import time
 import threading
 
-# ── MTS50/M-Z8 constants (Thorlabs datasheet HA0210T Rev K) ──────────────
-COUNTS_PER_MM = 34304
+# ── MTS50/M-Z8 constants ─────────────────────────────────────────────────
+# Z8-series scaling per the official APT protocol scaling chapter and Kinesis:
+# 512 counts/motor-rev x 67.49:1 gearhead x 1 mm leadscrew = 34554.96 counts/mm
+# (the widespread 34304 = 512 x 67 is an old integer approximation with ~0.73%
+# physical scale error — ~363 um over the full 50 mm travel).
+# Derived factors then match the documented Z8 values:
+#   velocity 772,981.37 dev-units/(mm/s), acceleration 263.84 dev-units/(mm/s^2)
+COUNTS_PER_MM = 34554.96
 TIME_UNIT = 2048 / 6e6
 
 # MTS50/M-Z8 stage limits
@@ -101,7 +107,7 @@ def _register_ftdi(vid, pid):
 # ── Unit conversions ─────────────────────────────────────────────────────
 
 def mm_to_counts(mm):
-    return int(mm * COUNTS_PER_MM)
+    return int(round(mm * COUNTS_PER_MM))
 
 
 def counts_to_mm(counts):
@@ -575,18 +581,22 @@ class MotorStage:
         vel = struct.unpack("<H", data[12:14])[0]
         flags = struct.unpack("<I", data[16:20])[0]
 
+        # Bit masks verified empirically on TDC001 hardware (raw-flag capture
+        # during move/jog/home) + APT protocol spec. Note TDC001 quirks:
+        # it sets 0x10 for motion in BOTH directions and never sets the jog
+        # bits — we still OR them in for other APT controllers.
         self._status["position"] = pos
         self._status["velocity"] = vel
         self._status["forward_limit_switch"] = bool(flags & 0x01)
         self._status["reverse_limit_switch"] = bool(flags & 0x02)
-        self._status["moving_forward"] = bool(flags & 0x10)
-        self._status["moving_reverse"] = bool(flags & 0x20)
+        self._status["moving_forward"] = bool(flags & (0x10 | 0x40))
+        self._status["moving_reverse"] = bool(flags & (0x20 | 0x80))
         self._status["homing"] = bool(flags & 0x200)
         self._status["homed"] = bool(flags & 0x400)
         self._status["settled"] = bool(flags & 0x2000)
-        self._status["motor_connected"] = bool(flags & 0x100000)
+        self._status["motor_connected"] = bool(flags & 0x100)      # was 0x100000 (a digital-input bit)
         self._status["channel_enabled"] = bool(flags & 0x80000000)
-        self._status["motion_error"] = bool(flags & 0x1000)
+        self._status["motion_error"] = bool(flags & 0x4000)        # was 0x1000 = TRACKING (not an error)
 
     def _parse_velparams(self, data):
         if len(data) < 20:
@@ -651,6 +661,16 @@ class MotorStage:
     def reset_zero(self):
         """Drop the zero offset; positions return to hardware coordinates."""
         self.zero_offset_mm = 0.0
+
+    @property
+    def min_position_mm(self):
+        """Lower travel bound in current (zeroed) coordinates."""
+        return TRAVEL_MIN - self.zero_offset_mm
+
+    @property
+    def max_position_mm(self):
+        """Upper travel bound in current (zeroed) coordinates."""
+        return TRAVEL_MAX - self.zero_offset_mm
 
     @property
     def velocity_mmps(self):

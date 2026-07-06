@@ -84,7 +84,7 @@ build_windows.bat
 - Maksimum hız: 2.4 mm/s
 - Maksimum ivme: 4.5 mm/s²
 - Minimum adım: 0.0008 mm (0.8 µm)
-- Sayaç çözünürlüğü: 34304 sayım/mm
+- Sayaç çözünürlüğü: 34 554.96 sayım/mm (Z8 serisi resmi ölçek; 1 sayım ≈ 0.0289 µm)
 
 ## Cihaz bulunamıyorsa (sorun giderme)
 
