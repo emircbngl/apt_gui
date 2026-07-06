@@ -76,6 +76,10 @@ def _is_macos():
     return sys.platform == "darwin"
 
 
+def _is_windows():
+    return sys.platform.startswith("win")
+
+
 def _is_apt_pid(pid):
     return pid in APT_PIDS
 
@@ -120,10 +124,89 @@ def _counts_to_acc(counts):
     return counts / (COUNTS_PER_MM * TIME_UNIT * TIME_UNIT * 65536)
 
 
+# ── FTDI D2XX (Windows) ──────────────────────────────────────────────────
+# Thorlabs Kinesis/APT installs the FTDI *D2XX* driver on Windows, under which
+# the device does NOT appear as a COM port — so pyserial can't see it. We talk
+# to it directly through the D2XX driver via the `ftd2xx` package, exposing a
+# small pyserial-compatible shim so MotorStage doesn't care which path it got.
+
+class _D2xxSerial:
+    """Minimal pyserial-like wrapper over an FTDI D2XX handle."""
+
+    def __init__(self, serial=None, index=0):
+        import ftd2xx
+        if serial:
+            sn = serial.encode() if isinstance(serial, str) else serial
+            self._h = ftd2xx.openEx(sn)
+        else:
+            self._h = ftd2xx.open(index)
+        # APT serial settings: 115200 8-N-1 with RTS/CTS hardware handshake.
+        self._h.setBaudRate(115200)
+        try:
+            self._h.setDataCharacteristics(8, 0, 0)  # BITS_8, STOP_BITS_1, PARITY_NONE
+        except Exception:
+            pass
+        try:
+            self._h.setFlowControl(0x0100, 0, 0)      # FLOW_RTS_CTS
+        except Exception:
+            pass
+        try:
+            self._h.setTimeouts(100, 100)             # ms (read, write)
+        except Exception:
+            pass
+        try:
+            self._h.setLatencyTimer(1)
+        except Exception:
+            pass
+        self.reset_input_buffer()
+        self.reset_output_buffer()
+
+    @classmethod
+    def from_url(cls, url):
+        rest = url[len("d2xx://"):]
+        if rest.startswith("index/"):
+            return cls(index=int(rest.split("/", 1)[1] or 0))
+        return cls(serial=rest)
+
+    def write(self, data):
+        return self._h.write(bytes(data))
+
+    def read(self, n):
+        try:
+            avail = self._h.getQueueStatus()
+        except Exception:
+            avail = 0
+        if not avail:
+            return b""
+        return self._h.read(min(n, avail))
+
+    def flush(self):
+        pass
+
+    def reset_input_buffer(self):
+        try:
+            self._h.purge(1)   # PURGE_RX
+        except Exception:
+            pass
+
+    def reset_output_buffer(self):
+        try:
+            self._h.purge(2)   # PURGE_TX
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            self._h.close()
+        except Exception:
+            pass
+
+
 # ── Port open ────────────────────────────────────────────────────────────
 
 def _open_port(serial_port):
-    """Open a port. ftdi:// URL -> pyftdi (libusb); anything else -> pyserial."""
+    """Open a port. ftdi:// -> pyftdi (libusb); d2xx:// -> FTDI D2XX (Windows);
+    anything else -> pyserial COM/tty port."""
     if serial_port.startswith("ftdi://"):
         # Register the exact vid:pid this URL points at (pyftdi refuses to parse
         # a URL whose product id it doesn't know), plus the default 0xFAF0.
@@ -133,6 +216,8 @@ def _open_port(serial_port):
         _register_ftdi(VID, PID)
         from pyftdi.serialext import serial_for_url
         port = serial_for_url(serial_port, baudrate=115200, timeout=0.1)
+    elif serial_port.startswith("d2xx://"):
+        port = _D2xxSerial.from_url(serial_port)
     else:
         import serial
         port = serial.Serial(serial_port, baudrate=115200, bytesize=8,
@@ -161,6 +246,44 @@ def _find_serial_ports():
                 "pid": getattr(p, "pid", None),
                 "kind": "serial",
             })
+    return found
+
+
+def _find_d2xx_devices():
+    """FTDI devices via the D2XX driver (Windows / Thorlabs Kinesis). Works even
+    when the device has no VCP COM port. Returns list of dicts."""
+    found = []
+    try:
+        import ftd2xx
+    except Exception:
+        return found
+    try:
+        count = ftd2xx.createDeviceInfoList()
+    except Exception:
+        return found
+    for i in range(count):
+        try:
+            info = ftd2xx.getDeviceInfoDetail(i)
+        except Exception:
+            continue
+        dev_id = info.get("id", 0) or 0
+        vid = (dev_id >> 16) & 0xFFFF
+        pid = dev_id & 0xFFFF
+        if vid and vid != VID:
+            continue  # a non-FTDI device somehow in the list
+        sn = info.get("serial", b"")
+        sn = sn.decode(errors="ignore") if isinstance(sn, (bytes, bytearray)) else str(sn or "")
+        desc = info.get("description", b"")
+        desc = desc.decode(errors="ignore") if isinstance(desc, (bytes, bytearray)) else str(desc or "")
+        if not sn:
+            continue  # can't address it reliably without a serial
+        found.append({
+            "port": f"d2xx://{sn}",
+            "serial_number": sn,
+            "description": desc or "APT Device",
+            "pid": pid or None,
+            "kind": "d2xx",
+        })
     return found
 
 
@@ -228,6 +351,14 @@ def find_devices():
         # Fallback: if a VCP driver *did* claim it, it shows up as /dev/cu.usbserial-*.
         for dev in _find_serial_ports():
             _add(dev)
+    elif _is_windows():
+        # Primary path on Windows: D2XX (Thorlabs Kinesis installs this driver,
+        # under which the device has NO COM port and pyserial can't see it).
+        for dev in _find_d2xx_devices():
+            _add(dev)
+        # Fallback: if the FTDI VCP driver is installed instead, it's a COM port.
+        for dev in _find_serial_ports():
+            _add(dev)
     else:
         for dev in _find_serial_ports():
             _add(dev)
@@ -266,12 +397,54 @@ def diagnose():
     except Exception:
         pass
 
+    # Windows: is the D2XX driver present, and how many FTDI devices does it see?
+    info["d2xx_available"] = None
+    info["d2xx_count"] = None
+    if _is_windows():
+        try:
+            import ftd2xx
+            info["d2xx_available"] = True
+            try:
+                info["d2xx_count"] = ftd2xx.createDeviceInfoList()
+            except Exception:
+                pass
+        except Exception:
+            info["d2xx_available"] = False
+
     if matched:
         info["message"] = f"{len(matched)} Thorlabs cihazı bulundu."
         return info
 
     # Nothing matched — build actionable guidance.
     lines = ["Hiç Thorlabs cihazı bulunamadı.", ""]
+
+    if _is_windows():
+        if info["d2xx_available"] is False:
+            lines += [
+                "Windows'ta Thorlabs cihazları D2XX sürücüsüyle konuşur ama",
+                "'ftd2xx' paketi kurulu değil. Komut isteminde çalıştırın:",
+                "    pip install ftd2xx",
+                "(veya INSTALL.bat'i yeniden çalıştırın).",
+            ]
+        elif info["d2xx_count"] == 0:
+            lines += [
+                "D2XX sürücüsü HİÇ FTDI cihazı görmüyor. Kontrol edin:",
+                "  • TDC001/KDC101 kutusu harici güce bağlı ve AÇIK mı?",
+                "  • USB kablosu VERİ kablosu mu? (sadece-şarj kablosu görünmez)",
+                "  • Thorlabs Kinesis/APT yazılımı açıksa cihazı kilitler — KAPATIN.",
+                "  • Aygıt Yöneticisi'nde cihaz FTDI/USB Serial olarak görünüyor mu?",
+            ]
+        else:
+            lines += [
+                f"D2XX {info['d2xx_count']} cihaz görüyor ama açılamadı. Büyük",
+                "olasılıkla Thorlabs Kinesis/APT yazılımı açık ve cihazı meşgul",
+                "ediyor — o yazılımı kapatıp yeniden tarayın.",
+            ]
+            if info["serial_ports"]:
+                lines.append("Seri portlar: " + ", ".join(info["serial_ports"]))
+        info["message"] = "\n".join(lines)
+        return info
+
     if info["usb_total"] == 0:
         lines += [
             "İşletim sistemi HİÇBİR USB cihazı görmüyor. Yani sorun uygulamada",

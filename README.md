@@ -22,7 +22,7 @@ APT protokolünü doğrudan konuşur (`devices.py`); `thorlabs-apt-device` gibi 
 | Platform | Yöntem | Sürücü |
 |----------|--------|--------|
 | macOS    | libusb (pyftdi) | Ek sürücü gerekmez — Thorlabs özel PID'i (0xFAF0) Apple'ın FTDI sürücüsünce sahiplenilmez, doğrudan libusb ile erişilir. `brew install libusb` gerekir. |
-| Windows  | Seri port (pyserial) | Thorlabs/FTDI VCP sürücüsü (Kinesis veya APT kurulumu ile gelir) COM portu oluşturur. |
+| Windows  | FTDI **D2XX** (`ftd2xx`), COM yedeği | Thorlabs Kinesis/APT kurulumu FTDI **D2XX** sürücüsünü kurar; bu modda cihaz bir **COM portu olarak GÖRÜNMEZ**, D2XX ile doğrudan erişilir. (VCP sürücüsü kuruluysa COM portu da denenir.) `pip install ftd2xx` gerekir; Kinesis kuruluysa D2XX DLL zaten mevcuttur. |
 
 Cihazlar `VID 0x0403 : PID 0xFAF0` ("APT DC Motor Controller", üretici "Thorlabs")
 olarak görünür.
@@ -92,5 +92,16 @@ build_windows.bat
 3. **Bağlantı:** Farklı bir USB port/kablo, mümkünse doğrudan bilgisayara (hub'sız).
 4. **Meşgul:** Eski Thorlabs APT/Kinesis yazılımı açıksa cihazı kilitler — kapatın.
 5. macOS'ta `brew install libusb` kurulu olduğundan emin olun.
+6. **Windows'ta cihaz bulunamıyorsa** (en sık neden): Thorlabs D2XX sürücüsü
+   kullanılır, cihaz COM portu olarak görünmez. `pip install ftd2xx` yaptığınızdan
+   ve Kinesis/APT yazılımının **kapalı** olduğundan emin olun.
 
-Uygulama içindeki "Cihazları Tara" bu kontrolleri sizin için özetler.
+### Teşhis komutu
+
+Cihaz bulunamıyorsa şunu çalıştırıp çıktıyı paylaşın — nedeni netleştirir:
+
+```bash
+python main.py --diag
+```
+
+Uygulama içindeki "Cihazları Tara" da bu kontrolleri özetleyen bir pencere gösterir.

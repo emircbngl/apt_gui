@@ -42,7 +42,7 @@ exit /b 0
 :install_deps
 echo.
 echo [2/3] Bagimliliklar kuruluyor...
-pip install pyserial PyQt5 pyinstaller 2>nul || pip3 install pyserial PyQt5 pyinstaller
+pip install pyserial PyQt5 pyinstaller ftd2xx 2>nul || pip3 install pyserial PyQt5 pyinstaller ftd2xx
 
 echo.
 echo [3/3] EXE olusturuluyor...
@@ -50,6 +50,7 @@ pyinstaller --onefile --windowed --name "ThorlabsAPT" ^
     --add-data "devices.py;." ^
     --add-data "gui.py;." ^
     --hidden-import serial.tools.list_ports ^
+    --hidden-import ftd2xx ^
     main.py
 
 echo.

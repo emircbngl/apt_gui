@@ -3,3 +3,6 @@ pyserial>=3.5
 # macOS libusb yolu için (Windows'ta gerekmez):
 pyftdi>=0.54; sys_platform == "darwin"
 pyusb>=1.2; sys_platform == "darwin"
+# Windows D2XX yolu için — Thorlabs Kinesis sürücüsü cihazı COM portu olarak
+# GÖSTERMEZ; D2XX ile doğrudan erişilir:
+ftd2xx>=1.3; sys_platform == "win32"
