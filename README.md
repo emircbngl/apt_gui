@@ -26,6 +26,11 @@ It speaks the APT protocol directly (`devices.py`) — no dependency on
   light meanings, usage tips
 - Per-motor nicknames persisted **by serial number** (a name follows its
   physical motor across USB ports), stored in `config.json`
+- **Built-in updates**: the app checks GitHub for a newer version (at most
+  once a day, in the background) and the **Updates** button installs it —
+  via `git pull` for git checkouts, or by downloading the repo zip and
+  replacing the app files in place (settings are never touched). A built
+  `.exe` downloads the zip for a manual rebuild.
 
 ## Connection method per platform
 

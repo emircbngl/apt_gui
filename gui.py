@@ -6,14 +6,17 @@ Each motor has its own panel. Global controls at the top.
 import sys
 import json
 import os
+import time
+import threading
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QPushButton, QDoubleSpinBox, QComboBox,
     QFrame, QGridLayout, QMessageBox, QSizePolicy, QLineEdit,
 )
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 
+import updater
 from devices import (
     MotorStage, find_devices, diagnose,
     TRAVEL_MIN, TRAVEL_MAX, VEL_MAX, ACC_MAX, MIN_STEP,
@@ -486,7 +489,14 @@ class MotorPanel(QGroupBox):
             w.setEnabled(enabled)
 
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+# In a PyInstaller onefile exe, __file__ resolves into the per-launch unpack
+# dir (deleted on exit) — settings would silently vanish. Keep the config next
+# to the executable there; next to the sources otherwise.
+if getattr(sys, "frozen", False):
+    _CONFIG_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    _CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(_CONFIG_DIR, "config.json")
 
 
 def _load_config():
@@ -506,9 +516,16 @@ def _save_config(cfg):
 
 
 class MainWindow(QMainWindow):
+    # Emitted from background update threads; the connected slots run in the
+    # GUI thread (queued across threads), so widget access stays safe.
+    update_checked = pyqtSignal(str)          # throttled auto-check result
+    explicit_check_done = pyqtSignal(str)     # Updates-button check result
+    install_finished = pyqtSignal(bool, str)  # install outcome (ok, message)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Thorlabs APT — 3x MTS50/M Stage Control")
+        self._update_busy = False
         self.setMinimumSize(1180, 380)
         self.resize(1300, 430)
 
@@ -518,6 +535,13 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._scan(show_dialog=False)   # scan at startup + apply saved nicknames
         self._poll_timer.start(200)
+
+        # Throttled background update check (at most once a day), started a
+        # little after launch so it never delays startup.
+        self.update_checked.connect(self._on_update_checked)
+        self.explicit_check_done.connect(self._on_explicit_check)
+        self.install_finished.connect(self._on_install_finished)
+        QTimer.singleShot(15000, self._start_update_check)
 
     def _build_ui(self):
         central = QWidget()
@@ -560,6 +584,11 @@ class MainWindow(QMainWindow):
         self.btn_guide.setToolTip("Hardware specs, light meanings, and usage tips")
         self.btn_guide.clicked.connect(self._show_guide)
         toolbar.addWidget(self.btn_guide)
+
+        self.btn_update = QPushButton("Updates")
+        self.btn_update.setToolTip(f"v{updater.local_version()} — check GitHub for a newer version")
+        self.btn_update.clicked.connect(self._update_dialog)
+        toolbar.addWidget(self.btn_update)
 
         toolbar.addStretch()
 
@@ -653,6 +682,125 @@ plug it into a different USB port.</li>
         lay = VBox(dlg)
         lay.addWidget(browser)
         dlg.exec_()
+
+    # ── Updates ──────────────────────────────────────────────────────
+
+    def _start_update_check(self):
+        """Daily-throttled check on a worker thread; result arrives via signal."""
+        cfg = _load_config()
+        if not updater.should_check(cfg.get("update_check", {}).get("last", 0)):
+            return
+
+        def work():
+            latest = updater.fetch_latest()
+            self.update_checked.emit(latest or "")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_checked(self, latest):
+        """GUI-thread slot: persist the check, surface a newer version.
+        A failed check ('') does NOT advance the daily throttle — otherwise a
+        single offline launch would suppress checks for a whole day."""
+        cfg = _load_config()
+        if latest:
+            cfg["update_check"] = {"last": time.time(), "latest": latest}
+            _save_config(cfg)
+        if latest and updater.is_newer(latest, updater.local_version()):
+            self.btn_update.setText(f"Update v{latest}")
+            self.btn_update.setStyleSheet("font-weight:bold;color:#E65100;")
+            self.btn_update.setToolTip(
+                f"v{latest} is available (you have v{updater.local_version()})")
+            self.lbl_status.setText(f"Update available: v{latest} "
+                                    f"(you have v{updater.local_version()})")
+
+    # All network/IO of the update flow runs on worker threads; results come
+    # back through signals so the event loop (motor polling, STOP buttons)
+    # stays live throughout.
+
+    def _update_dialog(self):
+        if self._update_busy:
+            return
+        self._update_busy = True
+        self.btn_update.setEnabled(False)
+        self.lbl_status.setText("Checking for updates...")
+
+        def work():
+            latest = updater.fetch_latest(timeout=8)
+            self.update_checked.emit(latest or "")
+            self.explicit_check_done.emit(latest or "")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_explicit_check(self, latest):
+        self._update_busy = False
+        self.btn_update.setEnabled(True)
+        local = updater.local_version()
+
+        if not latest:
+            self.lbl_status.setText("Update check failed")
+            QMessageBox.warning(self, "Updates",
+                                "Could not fetch update information from "
+                                "GitHub. Try again later.")
+            return
+        if not updater.is_newer(latest, local):
+            self.lbl_status.setText(f"Up to date (v{local})")
+            QMessageBox.information(self, "Updates",
+                                    f"You are up to date (v{local}).")
+            return
+
+        ans = QMessageBox.question(
+            self, "Update available",
+            f"Version v{latest} is available on GitHub (you have v{local}).\n\n"
+            "Download and install now? The update takes effect after you "
+            "restart the app. Your settings (config.json) are not touched.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if ans != QMessageBox.Yes:
+            return
+
+        self._update_busy = True
+        self.btn_update.setEnabled(False)
+        self.lbl_status.setText(f"Downloading update v{latest}...")
+
+        def install():
+            try:
+                if updater.is_git_checkout() and not updater.is_frozen():
+                    ok, output = updater.update_via_git()
+                    if ok:
+                        self.install_finished.emit(True,
+                            f"Updated to v{latest} via git.\n\n{output}\n\n"
+                            "Restart the app to run the new version.")
+                    else:
+                        self.install_finished.emit(False,
+                            f"git pull failed:\n\n{output}")
+                    return
+
+                zip_path = updater.download_zip()
+                if updater.is_frozen():
+                    self.install_finished.emit(True,
+                        "A built .exe cannot replace itself.\n\n"
+                        f"The new version was downloaded to:\n{zip_path}\n\n"
+                        "Extract it and rebuild with build_windows.bat, or "
+                        "run the app from source (python main.py).")
+                    return
+                try:
+                    updated = updater.apply_zip(zip_path)
+                finally:
+                    updater.cleanup_download(zip_path)
+                self.install_finished.emit(True,
+                    f"Updated to v{latest}. Replaced files:\n"
+                    + ", ".join(updated) +
+                    "\n\nRestart the app to run the new version.")
+            except Exception as e:
+                self.install_finished.emit(False, f"Update failed:\n{e}")
+        threading.Thread(target=install, daemon=True).start()
+
+    def _on_install_finished(self, ok, message):
+        self._update_busy = False
+        self.btn_update.setEnabled(True)
+        self.lbl_status.setText("Update installed — restart to apply" if ok
+                                else "Update failed")
+        if ok:
+            QMessageBox.information(self, "Updates", message)
+        else:
+            QMessageBox.warning(self, "Update failed", message)
 
     # ── Global Actions ───────────────────────────────────────────────
 

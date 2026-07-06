@@ -34,3 +34,6 @@ windows_build/
 # Agent working-agreement / meta (not part of the shipped app)
 claude.md
 CLAUDE.md
+
+# User data — written at runtime (nicknames, update-check state)
+config.json
