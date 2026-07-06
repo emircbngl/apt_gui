@@ -139,6 +139,25 @@ class MotorPanel(QGroupBox):
 
         layout.addLayout(status_grid)
 
+        # ── Zero / home ("set home" = make the current position 0.0000 mm)
+        zero_lay = QHBoxLayout()
+        self.btn_setzero = QPushButton("Ev = Sıfırla")
+        self.btn_setzero.setToolTip("Bu konumu 0.0000 mm (ev/referans) yap")
+        self.btn_setzero.clicked.connect(self._set_zero)
+        zero_lay.addWidget(self.btn_setzero)
+
+        self.btn_clearzero = QPushButton("↺")
+        self.btn_clearzero.setFixedWidth(32)
+        self.btn_clearzero.setToolTip("Sıfır ofsetini kaldır (donanım koordinatlarına dön)")
+        self.btn_clearzero.clicked.connect(self._clear_zero)
+        zero_lay.addWidget(self.btn_clearzero)
+
+        self.lbl_zero = QLabel("")
+        self.lbl_zero.setStyleSheet("color:#888;")
+        zero_lay.addWidget(self.lbl_zero)
+        zero_lay.addStretch()
+        layout.addLayout(zero_lay)
+
         # ── Move controls
         move_lay = QHBoxLayout()
         move_lay.addWidget(QLabel("Hedef:"))
@@ -299,6 +318,8 @@ class MotorPanel(QGroupBox):
         self.ind_homed.set_inactive()
         self.ind_moving.set_inactive()
         self.ind_enabled.set_inactive()
+        self.lbl_zero.setText("")
+        self.spin_abs.setRange(TRAVEL_MIN, TRAVEL_MAX)
 
     @property
     def is_connected(self):
@@ -334,6 +355,19 @@ class MotorPanel(QGroupBox):
         if self.stage:
             self.stage.set_enabled(self.btn_enable.isChecked())
 
+    def _set_zero(self):
+        """Make the current position 0.0000 mm (user-defined home/reference)."""
+        if self.stage:
+            self.stage.set_zero()
+            off = self.stage.zero_offset_mm
+            # Let absolute targets span the full physical travel in new coords.
+            self.spin_abs.setRange(TRAVEL_MIN - off, TRAVEL_MAX - off)
+
+    def _clear_zero(self):
+        if self.stage:
+            self.stage.reset_zero()
+            self.spin_abs.setRange(TRAVEL_MIN, TRAVEL_MAX)
+
     def _apply_velocity(self):
         if self.stage:
             self.stage.set_velocity(self.spin_vel.value(), self.spin_acc.value())
@@ -354,13 +388,16 @@ class MotorPanel(QGroupBox):
             self.btn_enable.blockSignals(True)
             self.btn_enable.setChecked(enabled)
             self.btn_enable.blockSignals(False)
+            off = getattr(self.stage, "zero_offset_mm", 0.0)
+            self.lbl_zero.setText(f"⌂ ofset: {off:+.4f} mm" if abs(off) > 1e-9 else "")
         except Exception:
             pass
 
     def _set_controls_enabled(self, enabled):
         for w in (self.spin_abs, self.spin_rel, self.spin_jog, self.spin_vel, self.spin_acc,
                   self.btn_go, self.btn_rel, self.btn_jog_rev, self.btn_jog_fwd,
-                  self.btn_home, self.btn_enable, self.btn_stop, self.btn_apply):
+                  self.btn_home, self.btn_enable, self.btn_stop, self.btn_apply,
+                  self.btn_setzero, self.btn_clearzero):
             w.setEnabled(enabled)
 
 

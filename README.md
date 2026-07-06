@@ -12,6 +12,9 @@ APT protokolünü doğrudan konuşur (`devices.py`); `thorlabs-apt-device` gibi 
 - 3 motoru yan yana, eşzamanlı kontrol (renk kodlu paneller)
 - Canlı pozisyon ve durum göstergeleri (home / hareket / etkin)
 - Mutlak konum, göreli hareket, jog ve home
+- **"Ev = Sıfırla"**: mevcut konumu 0.0000 mm (kullanıcı referansı) yapar —
+  yazılım ofsetiyle, donanım enkoderine dokunmadan (0–50 mm limitleri korunur);
+  ↺ ile donanım koordinatlarına dönülür
 - Ayarlanabilir hız ve ivme
 - Otomatik cihaz keşfi + **cihaz bulunamadığında neden bulunamadığını açıklayan
   teşhis** (güç/kablo/sürücü kontrol listesi)

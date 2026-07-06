@@ -519,6 +519,9 @@ class MotorStage:
         }
         self._vel_max = 0
         self._vel_acc = 0
+        # User-defined zero ("set home"): a software offset in true mm. The
+        # hardware encoder is never touched, so travel limits stay correct.
+        self.zero_offset_mm = 0.0
 
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._poll_thread.start()
@@ -630,8 +633,24 @@ class MotorStage:
         return dict(self._status)
 
     @property
-    def position_mm(self):
+    def _raw_position_mm(self):
+        """True position from the encoder (hardware reference, ignores zero)."""
         return counts_to_mm(self._status["position"])
+
+    @property
+    def position_mm(self):
+        """Position relative to the user-set zero/home (see set_zero())."""
+        return self._raw_position_mm - self.zero_offset_mm
+
+    def set_zero(self):
+        """Define the current position as 0 (home/reference). Pure software
+        offset — the hardware encoder is untouched, so 0–50 mm travel limits
+        stay correct and the true reference is preserved."""
+        self.zero_offset_mm = self._raw_position_mm
+
+    def reset_zero(self):
+        """Drop the zero offset; positions return to hardware coordinates."""
+        self.zero_offset_mm = 0.0
 
     @property
     def velocity_mmps(self):
@@ -657,15 +676,18 @@ class MotorStage:
         self._send_short(MOT_MOVE_HOME)
 
     def move_absolute(self, position_mm):
-        position_mm = max(TRAVEL_MIN, min(TRAVEL_MAX, position_mm))
-        counts = mm_to_counts(position_mm)
+        # position_mm is in user (zeroed) coords; convert to true coords + clamp.
+        true_target = position_mm + self.zero_offset_mm
+        true_target = max(TRAVEL_MIN, min(TRAVEL_MAX, true_target))
+        counts = mm_to_counts(true_target)
         payload = struct.pack("<hi", 0x0001, counts)
         self._send_long(MOT_MOVE_ABSOLUTE, payload)
 
     def move_relative(self, distance_mm):
-        target = self.position_mm + distance_mm
-        target = max(TRAVEL_MIN, min(TRAVEL_MAX, target))
-        counts = mm_to_counts(target - self.position_mm)
+        # Relative deltas are offset-independent; clamp in true coordinates.
+        true_current = self._raw_position_mm
+        true_target = max(TRAVEL_MIN, min(TRAVEL_MAX, true_current + distance_mm))
+        counts = mm_to_counts(true_target - true_current)
         payload = struct.pack("<hi", 0x0001, counts)
         self._send_long(MOT_MOVE_RELATIVE, payload)
 
