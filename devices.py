@@ -522,9 +522,11 @@ class MotorStage:
             "homing": False, "homed": False, "settled": False,
             "motor_connected": False, "channel_enabled": False,
             "motion_error": False, "motor_current_limit_reached": False,
+            "limit_stop": False,
         }
         self._vel_max = 0
         self._vel_acc = 0
+        self._prev_limit = False   # for the edge-triggered limit guard
         # User-defined zero ("set home"): a software offset in true mm. The
         # hardware encoder is never touched, so travel limits stay correct.
         self.zero_offset_mm = 0.0
@@ -615,9 +617,30 @@ class MotorStage:
                 resp = self._read_response(0.3)
                 if resp:
                     self._try_parse_all(resp)
+                    self._limit_guard()
             except Exception:
                 pass
             self._stop_event.wait(0.15)
+
+    def _limit_guard(self):
+        """Safety net: if a limit switch newly engages WHILE moving, send an
+        immediate stop. Edge-triggered on purpose — a limit that was already
+        engaged when the move started (i.e. moving AWAY from the switch) must
+        not trigger it. Disabled during homing, which drives into the switch
+        by design. This protects against strained stages after a power cycle,
+        when the counter reset makes software travel limits meaningless."""
+        s = self._status
+        lim = s["forward_limit_switch"] or s["reverse_limit_switch"]
+        rising = lim and not self._prev_limit
+        self._prev_limit = lim
+        if rising and self.is_moving and not s["homing"]:
+            try:
+                self.stop(immediate=True)
+                self._status["limit_stop"] = True
+            except Exception:
+                pass
+        elif not lim:
+            self._status["limit_stop"] = False
 
     def _try_parse_all(self, data):
         i = 0

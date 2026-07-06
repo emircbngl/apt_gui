@@ -53,6 +53,7 @@ class MotorPanel(QGroupBox):
         self.name = name
         self.stage = None
         self._serial_by_port = {}   # port URL -> serial number (from last scan)
+        self._prev_limit_shown = False
 
         self.setTitle(f"  {name}  ")
         self.setStyleSheet(f"""
@@ -139,6 +140,11 @@ class MotorPanel(QGroupBox):
         self.ind_enabled.setToolTip("Enabled: green=motor channel enabled (energized)")
         status_grid.addWidget(QLabel("En:"), 0, 6)
         status_grid.addWidget(self.ind_enabled, 0, 7)
+
+        self.ind_limit = StatusIndicator()
+        self.ind_limit.setToolTip("Limit: red=a limit switch is engaged (stage at the end of travel)")
+        status_grid.addWidget(QLabel("Lim:"), 0, 8)
+        status_grid.addWidget(self.ind_limit, 0, 9)
 
         layout.addLayout(status_grid)
 
@@ -326,6 +332,8 @@ class MotorPanel(QGroupBox):
         self.ind_homed.set_inactive()
         self.ind_moving.set_inactive()
         self.ind_enabled.set_inactive()
+        self.ind_limit.set_inactive()
+        self._prev_limit_shown = False
         self.lbl_zero.setText("")
         self.spin_abs.setRange(TRAVEL_MIN, TRAVEL_MAX)
 
@@ -347,8 +355,26 @@ class MotorPanel(QGroupBox):
             self._warn("homing started \u2014 the stage travels to the limit switch "
                        "and back (15\u201360 s); the Home light shows orange meanwhile")
 
+    def _confirm_unhomed_move(self):
+        """After a power cycle the counter resets wherever the stage sits, so
+        software travel limits cannot protect the physical ends until homed.
+        Make the user acknowledge that before an absolute move."""
+        if self.stage.is_homed:
+            return True
+        ans = QMessageBox.warning(
+            self, "Not homed",
+            f"{self.name} has not been homed since power-up.\n\n"
+            "Positions are relative to wherever the stage happened to be at "
+            "power-on, so the software 0\u201350 mm limits may NOT protect the "
+            "physical ends of travel \u2014 the stage could be driven into its "
+            "end stop.\n\nRecommended: press Home first.\n\nMove anyway?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return ans == QMessageBox.Yes
+
     def _move_absolute(self):
         if self.stage:
+            if not self._confirm_unhomed_move():
+                return
             target = self.spin_abs.value()
             lo, hi = self.stage.min_position_mm, self.stage.max_position_mm
             if target < lo or target > hi:
@@ -429,6 +455,18 @@ class MotorPanel(QGroupBox):
             self.ind_moving.set_warning() if self.stage.is_moving else self.ind_moving.set_inactive()
             if s["motion_error"]:
                 self.ind_moving.set_error()
+            # Limit-switch light + one-shot warning when it engages.
+            lim = s["forward_limit_switch"] or s["reverse_limit_switch"]
+            self.ind_limit.set_error() if lim else self.ind_limit.set_inactive()
+            if lim and not self._prev_limit_shown:
+                which = "forward" if s["forward_limit_switch"] else "reverse"
+                if s.get("limit_stop"):
+                    self._warn(f"LIMIT SWITCH ({which}) engaged during motion — "
+                               "motor stopped automatically")
+                else:
+                    self._warn(f"limit switch ({which}) engaged — stage is at "
+                               "the end of travel")
+            self._prev_limit_shown = lim
             enabled = s["channel_enabled"]
             self.ind_enabled.set_active() if enabled else self.ind_enabled.set_inactive()
             # Keep the toggle in sync with the device without re-triggering it.
@@ -588,7 +626,14 @@ datasheet values apply.</i></p>
 <tr><td rowspan="2"><b>Mov</b></td><td>🟠 orange</td><td>moving</td></tr>
 <tr><td>🔴 red</td><td>motion/position error reported</td></tr>
 <tr><td><b>En</b></td><td>🟢 green</td><td>motor channel enabled (energized). Toggle with "Enable"</td></tr>
+<tr><td><b>Lim</b></td><td>🔴 red</td><td>a limit switch is engaged — the stage is at the physical end of travel.
+If it engages during a move (outside homing), the motor is <b>stopped automatically</b></td></tr>
 </table>
+
+<p><b>⚠ After a power cycle, home before absolute moves.</b> The position counter
+resets to 0 wherever the stage physically sits, so the software 0–50 mm limits
+cannot protect the physical ends until the stage is re-homed. The app asks for
+confirmation before an absolute move on an unhomed motor for this reason.</p>
 
 <h2>Tips</h2>
 <ul>
