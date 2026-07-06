@@ -137,29 +137,44 @@ class _D2xxSerial:
         import ftd2xx
         if serial:
             sn = serial.encode() if isinstance(serial, str) else serial
+            if isinstance(sn, (bytes, bytearray)):
+                sn = sn.split(b"\x00", 1)[0]   # openEx matches the serial EXACTLY
             self._h = ftd2xx.openEx(sn)
         else:
             self._h = ftd2xx.open(index)
-        # APT serial settings: 115200 8-N-1 with RTS/CTS hardware handshake.
+        # FTDI init per Thorlabs APT protocol (Issue 24, Sec 2.1): 115200 8-N-1,
+        # purge bracketed by 50 ms dwells, reset, THEN arm RTS/CTS and assert RTS.
         self._h.setBaudRate(115200)
         try:
             self._h.setDataCharacteristics(8, 0, 0)  # BITS_8, STOP_BITS_1, PARITY_NONE
         except Exception:
             pass
+        time.sleep(0.05)
         try:
-            self._h.setFlowControl(0x0100, 0, 0)      # FLOW_RTS_CTS
+            self._h.purge(1 | 2)                     # PURGE_RX | PURGE_TX
+        except Exception:
+            pass
+        time.sleep(0.05)
+        try:
+            self._h.resetDevice()
         except Exception:
             pass
         try:
-            self._h.setTimeouts(100, 100)             # ms (read, write)
+            self._h.setFlowControl(0x0100, 0, 0)     # FLOW_RTS_CTS
         except Exception:
             pass
         try:
-            self._h.setLatencyTimer(1)
+            self._h.setRts()                          # spec asserts RTS explicitly
         except Exception:
             pass
-        self.reset_input_buffer()
-        self.reset_output_buffer()
+        try:
+            self._h.setTimeouts(100, 100)            # ms (read, write) — bounds stalls
+        except Exception:
+            pass
+        try:
+            self._h.setLatencyTimer(1)               # 1 ms (FTDI default 16 ms is sluggish)
+        except Exception:
+            pass
 
     @classmethod
     def from_url(cls, url):
@@ -261,9 +276,19 @@ def _find_d2xx_devices():
         count = ftd2xx.createDeviceInfoList()
     except Exception:
         return found
+
+    def _cstr(v):
+        # D2XX 'serial'/'description' are NUL-padded C strings — strip padding, or
+        # openEx() (exact serial match) will never find the device.
+        if isinstance(v, (bytes, bytearray)):
+            return v.split(b"\x00", 1)[0].decode(errors="ignore")
+        return str(v or "")
+
     for i in range(count):
         try:
-            info = ftd2xx.getDeviceInfoDetail(i)
+            # update=False: the list was already built by createDeviceInfoList()
+            # above; update=True would re-scan the bus on every iteration.
+            info = ftd2xx.getDeviceInfoDetail(i, update=False)
         except Exception:
             continue
         dev_id = info.get("id", 0) or 0
@@ -271,10 +296,8 @@ def _find_d2xx_devices():
         pid = dev_id & 0xFFFF
         if vid and vid != VID:
             continue  # a non-FTDI device somehow in the list
-        sn = info.get("serial", b"")
-        sn = sn.decode(errors="ignore") if isinstance(sn, (bytes, bytearray)) else str(sn or "")
-        desc = info.get("description", b"")
-        desc = desc.decode(errors="ignore") if isinstance(desc, (bytes, bytearray)) else str(desc or "")
+        sn = _cstr(info.get("serial", b""))
+        desc = _cstr(info.get("description", b""))
         if not sn:
             continue  # can't address it reliably without a serial
         found.append({
