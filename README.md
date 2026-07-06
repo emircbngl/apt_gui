@@ -101,23 +101,6 @@ no Python required.
   the motor; approach targets from the same direction for best repeatability)
 - Home location accuracy: ±4 µm
 
-## Known issues (verified on real hardware, 2026-07)
-
-- **Velocity scale is ~6× off (pending calibration):** setting 2.0 mm/s
-  produces ~0.33 mm/s of actual motion (consistent across four independent
-  measurements). Position accuracy is unaffected. The velocity/acceleration
-  conversion factor needs a measured calibration before it is corrected —
-  do not "fix" it by guess, a wrong correction would move the stages ~6×
-  faster than displayed.
-- **Limit-switch reporting is swapped on Z8 stages** (documented Thorlabs
-  quirk): during forward motion the forward end-of-travel switch reports as
-  the *reverse* limit bit, which defeats the TDC001's own forward-motion
-  hardware protection — the motor can keep driving into the end stop. This
-  app's edge-triggered limit guard listens to *both* bits and stops the motor
-  automatically. On the test rig the physical forward end sits at ~39–40 mm
-  (not the nominal 50 mm); the software range intentionally remains 0–50 mm
-  and protection relies on the limit guard.
-
 ## If no devices are found (troubleshooting)
 
 1. **Power:** Is the T-Cube/K-Cube connected to external power (power supply
