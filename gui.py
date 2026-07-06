@@ -52,6 +52,7 @@ class MotorPanel(QGroupBox):
         self.color = color
         self.name = name
         self.stage = None
+        self._serial_by_port = {}   # port URL -> serial number (from last scan)
 
         self.setTitle(f"  {name}  ")
         self.setStyleSheet(f"""
@@ -245,7 +246,9 @@ class MotorPanel(QGroupBox):
     # ── Connection ───────────────────────────────────────────────────
 
     def populate_ports(self, devices):
+        self._serial_by_port = {d["port"]: d.get("serial_number", "") for d in devices}
         current = self.port_combo.currentData()
+        self.port_combo.blockSignals(True)
         self.port_combo.clear()
         for dev in devices:
             sn = dev.get("serial_number", "")
@@ -255,6 +258,11 @@ class MotorPanel(QGroupBox):
             idx = self.port_combo.findData(current)
             if idx >= 0:
                 self.port_combo.setCurrentIndex(idx)
+        self.port_combo.blockSignals(False)
+
+    def current_serial(self):
+        """Serial number of the currently selected device ('' if none)."""
+        return self._serial_by_port.get(self.port_combo.currentData(), "")
 
     def _toggle_connection(self):
         if self.stage:
@@ -386,7 +394,7 @@ class MainWindow(QMainWindow):
         self._poll_timer = QTimer()
         self._poll_timer.timeout.connect(self._poll_all)
         self._build_ui()
-        self._load_nicknames()
+        self._scan(show_dialog=False)   # açılışta tara + kayıtlı isimleri uygula
         self._poll_timer.start(200)
 
     def _build_ui(self):
@@ -436,6 +444,9 @@ class MainWindow(QMainWindow):
         for i in range(3):
             panel = MotorPanel(i, COLORS[i], NAMES[i])
             panel.nick_edit.editingFinished.connect(self._save_nicknames)
+            # When the panel's device changes, show that serial's saved name.
+            panel.port_combo.currentIndexChanged.connect(
+                lambda _idx, p=panel: self._apply_nickname(p))
             self.panels.append(panel)
             panels_lay.addWidget(panel, 1)
         root.addLayout(panels_lay, 1)
@@ -449,7 +460,7 @@ class MainWindow(QMainWindow):
 
     # ── Global Actions ───────────────────────────────────────────────
 
-    def _scan(self):
+    def _scan(self, show_dialog=True):
         devices = find_devices()
         for panel in self.panels:
             panel.populate_ports(devices)
@@ -457,14 +468,18 @@ class MainWindow(QMainWindow):
         for i, panel in enumerate(self.panels):
             if i < len(devices) and i < panel.port_combo.count():
                 panel.port_combo.setCurrentIndex(i)
+        # Restore each panel's saved name from its device's serial number.
+        for panel in self.panels:
+            self._apply_nickname(panel)
 
         if devices:
             self.lbl_status.setText(f"{len(devices)} cihaz bulundu")
         else:
             # No device: explain *why* instead of a silent empty list.
             self.lbl_status.setText("0 cihaz bulundu")
-            info = diagnose()
-            QMessageBox.warning(self, "Cihaz bulunamadı", info["message"])
+            if show_dialog:
+                info = diagnose()
+                QMessageBox.warning(self, "Cihaz bulunamadı", info["message"])
 
     def _connect_all(self):
         for panel in self.panels:
@@ -498,17 +513,35 @@ class MainWindow(QMainWindow):
 
     # ── Nickname persistence ────────────────────────────────────────
 
-    def _load_nicknames(self):
-        cfg = _load_config()
-        names = cfg.get("nicknames", {})
-        for i, panel in enumerate(self.panels):
-            nick = names.get(str(i), "")
-            if nick:
-                panel.set_nickname(nick)
+    def _apply_nickname(self, panel):
+        """Name a panel from the saved name for its selected device's serial."""
+        sn = panel.current_serial()
+        if not sn:
+            return
+        names = _load_config().get("nicknames", {})
+        if isinstance(names, dict) and names.get(sn):
+            panel.set_nickname(names[sn])
 
     def _save_nicknames(self):
+        """Persist names keyed by SERIAL NUMBER, so a name follows its physical
+        motor regardless of which panel/USB port it lands on. Merges — motors
+        that aren't connected right now keep their saved names. Only real custom
+        names are stored; a name left at (or reverted to) the default is dropped
+        so defaults never follow a serial around."""
         cfg = _load_config()
-        cfg["nicknames"] = {str(i): p.name for i, p in enumerate(self.panels)}
+        names = cfg.get("nicknames", {})
+        if not isinstance(names, dict):
+            names = {}
+        for panel in self.panels:
+            sn = panel.current_serial()
+            if not sn:
+                continue
+            default = f"Motor {panel.index + 1}"
+            if panel.name and panel.name != default:
+                names[sn] = panel.name
+            else:
+                names.pop(sn, None)
+        cfg["nicknames"] = names
         _save_config(cfg)
 
     def closeEvent(self, event):
